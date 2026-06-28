@@ -164,6 +164,7 @@
 
             const totalXpToAward = (score * 10) + (passed ? 50 : 0);
             const { error } = await supabase.rpc('submit_quiz_and_update_xp', {
+                p_user_id: currentUser.id,
                 p_course_id: courseId,
                 p_score: percentage,
                 p_passed: passed,

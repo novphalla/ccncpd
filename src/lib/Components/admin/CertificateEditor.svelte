@@ -549,7 +549,7 @@
                 <label class="label text-xs">ទីតាំង X</label>
                 <div class="flex gap-1">
                     <input type="number" bind:value={editingCourse.cert_config.name.x} class="input input-sm input-bordered w-full bg-gray-50 rounded-lg" />
-                        <button class="w-8 h-8 flex items-center justify-center border border-gray-300 rounded-lg bg-white hover:bg-gray-50 cursor-pointer" style="color: #4b5563;" on:click={() => centerElement('gender')} title="តម្រើមចំកណ្តាល"><TargetIcon class="w-4 h-4" /></button>
+                        <button class="w-8 h-8 flex items-center justify-center border border-gray-300 rounded-lg bg-white hover:bg-gray-50 cursor-pointer" style="color: #4b5563;" on:click={() => centerElement('name')} title="តម្រើមចំកណ្តាល"><TargetIcon class="w-4 h-4" /></button>
                 </div>
             </div>
                     <div class="form-control"><label class="label text-xs">ទីតាំង Y</label><input type="number" bind:value={editingCourse.cert_config.name.y} class="input input-sm input-bordered bg-gray-50 rounded-lg" /></div>
