@@ -1,0 +1,23 @@
+{
+  "name": "CCN-CPD",
+  "short_name": "CCN-CPD",
+  "description": "ប្រព័ន្ធគាំទ្រការអភិវឌ្ឍវិជ្ជាជីវៈបន្តសម្រាប់គិលានុបដ្ឋាក",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0d9488",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

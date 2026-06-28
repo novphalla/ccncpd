@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Nokora:wght@400;700&display=swap');
+.sveltekit-body {
+  display: contents;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: 'KhmerOSMoulLight';
+  src: url('/fonts/KhmerOSMoulLight.ttf') format('truetype');
+  font-display: swap;
+}
+
+.font-moul {
+  font-family: 'KhmerOSMoulLight', 'Nokora', sans-serif;
+}
+.font-moul {
+  font-family: 'Moul', 'Siemreap', 'Khmer OS', 'Battambang', 'system-ui', 'sans-serif';
+}
