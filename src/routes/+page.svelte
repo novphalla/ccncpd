@@ -604,21 +604,6 @@
             }
         }
 
-        // --- បន្ថែម៖ Deep Linking (បើកវគ្គសិក្សាតាមរយៈ Link) ---
-        const courseId = urlParams.get('course_id');
-        if (courseId) {
-            const course = courses.find(c => String(c.id) === String(courseId));
-            if (course) {
-                openLesson(course);
-                // លុប query param ចេញដើម្បីកុំឱ្យជាប់ពេល refresh
-                replaceState(window.location.pathname, {});
-            } else {
-                // ករណីវគ្គមិនទាន់ Load មកដល់ (ឧ. មិនទាន់ Published) អាចសាកល្បងទាញយកផ្ទាល់
-                const { data } = await supabase.from('courses').select('*').eq('id', courseId).maybeSingle();
-                if (data) openLesson(data);
-            }
-        }
-
         // --- Deep Linking សម្រាប់លិខិតបញ្ជាក់ ---
         const certCourseId = urlParams.get('cert_course_id');
         if (certCourseId) {
@@ -1137,26 +1122,6 @@
         }
     }
 
-    async function shareCourse(course) {
-        // កែប្រែ៖ បន្ថែម ?course_id=... ទៅក្នុង Link
-        const shareUrl = `${window.location.origin}?course_id=${course.id}`;
-        const shareText = `តោះចូលរៀនវគ្គ "${course.title}" ក្នុងកម្មវិធី CCN-CPD!\n\nចុះឈ្មោះនិងចូលរៀននៅទីនេះ៖ ${shareUrl}`;
-        
-        if (navigator.share) {
-            try {
-                await navigator.share({
-                    title: 'CCN-CPD - ' + course.title,
-                    text: shareText,
-                    url: shareUrl
-                });
-            } catch (err) {
-                console.error('Error sharing:', err);
-            }
-        } else {
-            copyToClipboard(shareUrl, "បានចម្លងតំណភ្ជាប់វគ្គសិក្សា!");
-        }
-    }
-
     async function shareQuiz(course) {
         const shareUrl = `${window.location.origin}?quiz_id=${course.id}`;
         const shareText = `តោះធ្វើតេស្តវគ្គ "${course.title}" ក្នុងកម្មវិធី CCN-CPD!\n\nចូលធ្វើតេស្តនៅទីនេះ៖ ${shareUrl}`;
@@ -1421,7 +1386,7 @@
     $: coursesQuery = createQuery({
         queryKey: ['courses', currentUser?.role], // Refetch when role changes
         queryFn: async () => {
-            const courseColumns = 'id, title, description, category, duration, pdf_url, thumbnail_url, is_featured, is_published, created_at, sort_order, cert_template_url, cert_end_date, cert_start_date, post_test_auto_close_date, post_test_fixed_date, quiz_cooldown, has_pre_test, lessons_enabled, evaluation_form_id';
+            const courseColumns = 'id, title, description, category, duration, pdf_url, thumbnail_url, is_featured, is_published, created_at, sort_order, cert_template_url, cert_end_date, cert_start_date, post_test_auto_close_date, post_test_fixed_date, quiz_cooldown, has_pre_test, lessons_enabled, evaluation_form_id, cert_config';
             try {
                 let query = supabase.from('courses').select(courseColumns).is('deleted_at', null).order('sort_order', {ascending: true}).order('created_at', {ascending: false}).limit(100);
                 if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
@@ -1647,7 +1612,6 @@
                     const { id, type } = typeof e.detail === 'object' ? e.detail : { id: e.detail, type: 'post' };
                     startQuiz(id, false, type);
                 }}
-                on:shareCourse={(e) => shareCourse(e.detail)}
                 on:shareMeeting={(e) => shareMeeting(e.detail)}
                 on:openMeetingRegistration={(e) => openMeetingRegistration(e.detail)}
                 on:openEvaluationForm={(e) => openEvaluationForm(e.detail)}

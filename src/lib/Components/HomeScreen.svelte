@@ -40,6 +40,29 @@
     let lessonForPlayer = null; // To hold the specific lesson to play
     let lessonsForPlayer = [];
     let showTutorialModal = false;
+    let courseEnrollments = {};
+    let enrollmentUserId = null;
+    let couponInputs = {};
+    let appliedCoupons = {};
+    let couponMessages = {};
+
+    const defaultProgramConfig = {
+        access_mode: 'open_access',
+        pricing_type: 'free',
+        price: 0,
+        currency: 'KHR',
+        capacity: null,
+        registration_open_at: null,
+        registration_close_at: null,
+        learning_start_at: null,
+        learning_end_at: null,
+        payment_instructions: '',
+        require_payment_approval: true,
+        require_attendance: false,
+        require_test_pass: true,
+        require_evaluation: true,
+        certificate_enabled: true
+    };
 
     onMount(() => {
         const interval = setInterval(() => {
@@ -48,6 +71,10 @@
         }, 1000);
         return () => clearInterval(interval);
     });
+
+    $: if (currentUser?.id && currentUser.id !== enrollmentUserId) {
+        loadCourseEnrollments();
+    }
 
     // Extract unique categories from courses
     $: categories = ['All', ...new Set(courses.map(c => c.category).filter(Boolean))];
@@ -88,6 +115,258 @@
         return registeredMeetingIds.includes(meetingId);
     }
 
+    function programConfigFor(course) {
+        return {
+            ...defaultProgramConfig,
+            ...(course?.cert_config?.program || {})
+        };
+    }
+
+    function enrollmentStorageKey() {
+        return currentUser?.id ? `course_enrollments_${currentUser.id}` : null;
+    }
+
+    async function loadCourseEnrollments() {
+        enrollmentUserId = currentUser?.id || null;
+        if (typeof localStorage === 'undefined' || !enrollmentUserId) {
+            courseEnrollments = {};
+            return;
+        }
+        try {
+            courseEnrollments = JSON.parse(localStorage.getItem(enrollmentStorageKey()) || '{}');
+        } catch {
+            courseEnrollments = {};
+        }
+
+        if (supabase) {
+            const { data, error } = await supabase
+                .from('course_enrollments')
+                .select('course_id, status, pricing_type, price, original_price, discount_amount, final_price, currency, payment_status, coupon_code, registered_at')
+                .eq('user_id', enrollmentUserId);
+
+            if (!error && data) {
+                const fromDb = {};
+                data.forEach(row => {
+                    fromDb[String(row.course_id)] = row;
+                });
+                saveCourseEnrollments({ ...courseEnrollments, ...fromDb });
+            } else if (error && error.code !== '42P01' && error.code !== 'PGRST205') {
+                console.warn('Could not load course enrollments:', error.message);
+            }
+        }
+    }
+
+    function saveCourseEnrollments(next) {
+        courseEnrollments = next;
+        const key = enrollmentStorageKey();
+        if (typeof localStorage !== 'undefined' && key) {
+            localStorage.setItem(key, JSON.stringify(courseEnrollments));
+        }
+    }
+
+    function courseEnrollment(course) {
+        return courseEnrollments[String(course.id)] || null;
+    }
+
+    function courseEnrollmentStatus(course) {
+        return courseEnrollment(course)?.status || null;
+    }
+
+    function isProgramEnrollmentCourse(course) {
+        return programConfigFor(course).access_mode === 'program_enrollment';
+    }
+
+    function isCourseRegistered(course) {
+        const status = courseEnrollmentStatus(course);
+        return status === 'registered' || status === 'approved';
+    }
+
+    function isCoursePendingPayment(course) {
+        return courseEnrollmentStatus(course) === 'pending_payment';
+    }
+
+    function isCourseRegistrationClosed(course) {
+        const program = programConfigFor(course);
+        const closeAt = program.registration_close_at ? new Date(program.registration_close_at).getTime() : null;
+        return closeAt && now > closeAt;
+    }
+
+    function isCourseRegistrationNotOpen(course) {
+        const program = programConfigFor(course);
+        const openAt = program.registration_open_at ? new Date(program.registration_open_at).getTime() : null;
+        return openAt && now < openAt;
+    }
+
+    function isLearningTimeLocked(course) {
+        const program = programConfigFor(course);
+        const startAt = program.learning_start_at ? new Date(program.learning_start_at).getTime() : null;
+        return startAt && now < startAt;
+    }
+
+    function isCourseRegistrationRequired(course) {
+        return isProgramEnrollmentCourse(course) && !isCourseRegistered(course);
+    }
+
+    function formatProgramPrice(program) {
+        const amount = Number(program?.price || 0);
+        return `${amount.toLocaleString()} ${program?.currency || 'KHR'}`;
+    }
+
+    function formatMoney(amount, currency = 'KHR') {
+        return `${Number(amount || 0).toLocaleString()} ${currency || 'KHR'}`;
+    }
+
+    function couponFor(course) {
+        return appliedCoupons[String(course.id)] || null;
+    }
+
+    function couponDiscountFor(course, program = programConfigFor(course)) {
+        const coupon = couponFor(course);
+        if (!coupon || program.pricing_type !== 'paid') return 0;
+        const price = Number(program.price || 0);
+        const value = Number(coupon.discount_value || 0);
+        const discount = coupon.discount_type === 'percent'
+            ? price * Math.min(Math.max(value, 0), 100) / 100
+            : value;
+        return Math.min(price, Math.max(0, discount));
+    }
+
+    function finalPriceFor(course, program = programConfigFor(course)) {
+        return Math.max(0, Number(program.price || 0) - couponDiscountFor(course, program));
+    }
+
+    async function applyCoupon(course) {
+        const code = (couponInputs[String(course.id)] || '').trim().toUpperCase();
+        const program = programConfigFor(course);
+        if (!code) {
+            couponMessages = { ...couponMessages, [String(course.id)]: 'សូមបញ្ចូល coupon code' };
+            return;
+        }
+        if (!supabase) return;
+
+        const { data, error } = await supabase
+            .from('course_coupons')
+            .select('*')
+            .eq('code', code)
+            .eq('is_active', true)
+            .maybeSingle();
+
+        if (error) {
+            if (error.code === '42P01' || error.code === 'PGRST205') {
+                couponMessages = { ...couponMessages, [String(course.id)]: 'Coupon មិនទាន់បានបើកប្រើក្នុង database' };
+            } else {
+                couponMessages = { ...couponMessages, [String(course.id)]: error.message };
+            }
+            return;
+        }
+
+        const invalid = !data
+            || (data.course_id && String(data.course_id) !== String(course.id))
+            || (data.currency && data.currency !== program.currency)
+            || (data.starts_at && new Date(data.starts_at).getTime() > now)
+            || (data.expires_at && new Date(data.expires_at).getTime() < now)
+            || (data.max_uses !== null && data.max_uses !== undefined && Number(data.used_count || 0) >= Number(data.max_uses));
+
+        if (invalid) {
+            appliedCoupons = { ...appliedCoupons, [String(course.id)]: null };
+            couponMessages = { ...couponMessages, [String(course.id)]: 'Coupon មិនត្រឹមត្រូវ ឬផុតកំណត់' };
+            return;
+        }
+
+        appliedCoupons = { ...appliedCoupons, [String(course.id)]: data };
+        couponMessages = {
+            ...couponMessages,
+            [String(course.id)]: `បានបញ្ចុះ ${formatMoney(couponDiscountFor(course, program), program.currency)}`
+        };
+    }
+
+    async function saveCourseEnrollmentToDb(course, enrollment) {
+        if (!supabase || !currentUser?.id) return false;
+
+        const { error } = await supabase
+            .from('course_enrollments')
+            .upsert({
+                course_id: course.id,
+                user_id: currentUser.id,
+                status: enrollment.status,
+                pricing_type: enrollment.pricing_type,
+                price: enrollment.price,
+                original_price: enrollment.original_price,
+                discount_amount: enrollment.discount_amount,
+                final_price: enrollment.final_price,
+                currency: enrollment.currency,
+                payment_status: enrollment.payment_status || (enrollment.status === 'pending_payment' ? 'pending' : 'not_required'),
+                coupon_id: enrollment.coupon_id || null,
+                coupon_code: enrollment.coupon_code || null,
+                registered_at: enrollment.registered_at
+            }, { onConflict: 'course_id,user_id' });
+
+        if (error) {
+            if (error.code !== '42P01' && error.code !== 'PGRST205') {
+                console.warn('Could not save course enrollment:', error.message);
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    async function handleCourseRegistration(course) {
+        if (!currentUser?.id) {
+            return alert('សូមចូលគណនីជាមុនសិន។');
+        }
+
+        const program = programConfigFor(course);
+        if (!isProgramEnrollmentCourse(course)) return;
+
+        if (isCourseRegistrationNotOpen(course)) {
+            return alert('ការចុះឈ្មោះវគ្គនេះមិនទាន់បើកទេ។');
+        }
+        if (isCourseRegistrationClosed(course)) {
+            return alert('ការចុះឈ្មោះវគ្គនេះបានបិទហើយ។');
+        }
+
+        const isPaid = program.pricing_type === 'paid';
+        const originalPrice = Number(program.price || 0);
+        const discountAmount = isPaid ? couponDiscountFor(course, program) : 0;
+        const finalPrice = isPaid ? finalPriceFor(course, program) : 0;
+        const coupon = couponFor(course);
+        const needsPayment = isPaid && finalPrice > 0 && program.require_payment_approval;
+        const status = needsPayment ? 'pending_payment' : 'registered';
+        const enrollment = {
+            status,
+            pricing_type: program.pricing_type,
+            price: finalPrice,
+            original_price: originalPrice,
+            discount_amount: discountAmount,
+            final_price: finalPrice,
+            currency: program.currency,
+            payment_status: needsPayment ? 'pending' : 'not_required',
+            coupon_id: coupon?.id || null,
+            coupon_code: coupon?.code || null,
+            registered_at: new Date().toISOString()
+        };
+
+        const next = {
+            ...courseEnrollments,
+            [String(course.id)]: enrollment
+        };
+        const saved = await saveCourseEnrollmentToDb(course, enrollment);
+        if (saved && coupon?.id && supabase) {
+            await supabase
+                .from('course_coupons')
+                .update({ used_count: Number(coupon.used_count || 0) + 1, updated_at: new Date().toISOString() })
+                .eq('id', coupon.id);
+        }
+        saveCourseEnrollments(next);
+
+        if (status === 'pending_payment') {
+            alert(`បានចុះឈ្មោះរួច។ សូមបង់ប្រាក់ ${formatMoney(finalPrice, program.currency)} ហើយរង់ចាំ Admin approve។${discountAmount > 0 ? `\nបញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}${program.payment_instructions ? `\n\n${program.payment_instructions}` : ''}`);
+        } else {
+            alert('បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។');
+        }
+    }
+
     function isJoinAvailable(meeting) {
         // null countdown means no gate set, OR gate has already passed → joinable
         return !meetingCountdowns[meeting.id];
@@ -121,15 +400,28 @@
 
     async function logAccessAttempt(courseId, reason) {
         if (!currentUser || !supabase) return;
-        await supabase.from('access_attempts').insert({
+        const { error } = await supabase.from('access_attempts').insert({
             user_id: currentUser.id,
             course_id: courseId,
             reason: reason
         });
+        if (error && error.code !== '42P01' && error.code !== 'PGRST205') {
+            console.warn('Could not log access attempt:', error.message);
+        }
     }
 
     async function handleCourseClick(course) {
         if (isLocked(course)) {
+            if (isCourseRegistrationRequired(course)) {
+                logAccessAttempt(course.id, 'registration_required');
+                if (isCoursePendingPayment(course)) return alert('វគ្គនេះកំពុងរង់ចាំ Admin approve ការបង់ប្រាក់។');
+                return alert('សូមចុះឈ្មោះវគ្គនេះជាមុនសិន។');
+            }
+            if (isLearningTimeLocked(course)) {
+                logAccessAttempt(course.id, 'learning_not_started');
+                const start = new Date(programConfigFor(course).learning_start_at).toLocaleString('km-KH');
+                return alert(`វគ្គនេះនឹងបើករៀននៅ ${start}`);
+            }
             if (course.has_pre_test && !preTestDoneCourses.includes(String(course.id))) {
                 logAccessAttempt(course.id, 'pre_test_required');
                 return alert("សូមធ្វើតេស្តដើមវគ្គ (Pre-test) ជាមុនសិន។");
@@ -179,6 +471,8 @@
     }
 
     function isLocked(course) {
+        if (isCourseRegistrationRequired(course)) return true;
+        if (isProgramEnrollmentCourse(course) && isLearningTimeLocked(course)) return true;
         if (course.has_pre_test && !preTestDoneCourses.includes(String(course.id))) return true;
         if (course.has_pre_test && !postTestAttemptedCourses.includes(String(course.id))) return true;
         if (course.lessons_enabled === false) return true;
@@ -423,6 +717,7 @@
             <!-- Course List -->
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5" in:fade>
                 {#each displayCourses as course (course.id)}
+                    {@const program = programConfigFor(course)}
                     <div class="card bg-white shadow-sm hover:shadow-lg transition-all duration-200 overflow-hidden group rounded-2xl cursor-pointer border border-gray-200" on:click={() => handleCourseClick(course)}>
                         <figure class="h-44 bg-gray-100 relative overflow-hidden">
                             {#if course.thumbnail_url}
@@ -457,6 +752,19 @@
                                         {course.category}
                                     </div>
                                 {/if}
+                                {#if isProgramEnrollmentCourse(course)}
+                                    <div class="badge {isCourseRegistered(course) ? 'badge-success text-white' : isCoursePendingPayment(course) ? 'badge-warning' : 'badge-primary'} text-xs shadow-sm border-none">
+                                        {#if isCourseRegistered(course)}
+                                            បានចុះឈ្មោះ
+                                        {:else if isCoursePendingPayment(course)}
+                                            រង់ចាំ approve
+                                        {:else if program.pricing_type === 'paid'}
+                                            {formatProgramPrice(program)}
+                                        {:else}
+                                            ចុះឈ្មោះ Free
+                                        {/if}
+                                    </div>
+                                {/if}
                             </div>
                             
                             <div class="absolute bottom-2 right-2 badge badge-neutral text-white text-xs">
@@ -467,14 +775,64 @@
                         <div class="card-body p-4">
                             <div class="flex justify-between items-start gap-2">
                                 <h2 class="card-title text-base font-bold line-clamp-2 min-h-[3rem] text-base-content leading-snug">{course.title}</h2>
-                                <button class="btn btn-ghost btn-xs btn-circle text-gray-400 hover:text-primary" on:click|stopPropagation={() => dispatch('shareCourse', course)}>
-                                    🔗
-                                </button>
                             </div>
                             <p class="text-xs text-base-content line-clamp-2 mb-4 h-8">{course.description || t('no_description')}</p>
                             
                             <div class="card-actions flex-col gap-2 mt-auto">
-                                {#if course.has_pre_test && !preTestDoneCourses.includes(String(course.id))}
+                                {#if isCourseRegistrationRequired(course)}
+                                    <div class="w-full relative z-10" on:click|stopPropagation>
+                                        {#if isCoursePendingPayment(course)}
+                                            <button class="btn btn-warning btn-sm w-full text-white" disabled>
+                                                ⏳ រង់ចាំ Admin approve
+                                            </button>
+                                            <p class="text-[11px] text-warning mt-1 text-center">បង់ប្រាក់រួចហើយ សូមរង់ចាំការអនុម័ត</p>
+                                        {:else if isCourseRegistrationClosed(course)}
+                                            <button class="btn btn-outline btn-sm w-full bg-gray-100 text-red-500 border-gray-300" disabled>
+                                                ការចុះឈ្មោះបានបិទ
+                                            </button>
+                                        {:else if isCourseRegistrationNotOpen(course)}
+                                            <button class="btn btn-outline btn-sm w-full bg-gray-100 text-gray-500 border-gray-300" disabled>
+                                                មិនទាន់បើកចុះឈ្មោះ
+                                            </button>
+                                        {:else}
+                                            {#if program.pricing_type === 'paid'}
+                                                <div class="w-full mb-2">
+                                                    <div class="flex gap-2">
+                                                        <input
+                                                            class="input input-bordered input-sm flex-1 bg-white"
+                                                            placeholder="Coupon code"
+                                                            value={couponInputs[String(course.id)] || ''}
+                                                            on:input={(e) => couponInputs = { ...couponInputs, [String(course.id)]: e.target.value }}
+                                                        />
+                                                        <button class="btn btn-outline btn-sm" on:click={() => applyCoupon(course)}>
+                                                            Apply
+                                                        </button>
+                                                    </div>
+                                                    {#if couponMessages[String(course.id)]}
+                                                        <p class="text-[11px] mt-1 text-center {couponFor(course) ? 'text-success' : 'text-error'}">
+                                                            {couponMessages[String(course.id)]}
+                                                        </p>
+                                                    {/if}
+                                                    {#if couponFor(course)}
+                                                        <p class="text-[11px] mt-1 text-center text-gray-500">
+                                                            តម្លៃត្រូវបង់: <strong>{formatMoney(finalPriceFor(course, program), program.currency)}</strong>
+                                                            <span class="line-through ml-1">{formatProgramPrice(program)}</span>
+                                                        </p>
+                                                    {/if}
+                                                </div>
+                                            {/if}
+                                            <button class="btn btn-primary btn-sm w-full shadow-md shadow-primary/20" on:click={() => handleCourseRegistration(course)}>
+                                                {program.pricing_type === 'paid' ? `ចុះឈ្មោះ និងបង់ ${formatMoney(finalPriceFor(course, program), program.currency)}` : 'ចុះឈ្មោះ Free'}
+                                            </button>
+                                        {/if}
+                                    </div>
+                                {:else if isProgramEnrollmentCourse(course) && isLearningTimeLocked(course)}
+                                    <div class="w-full relative z-10" on:click|stopPropagation>
+                                        <button class="btn btn-outline btn-sm w-full bg-gray-100 text-gray-500 border-gray-300" disabled>
+                                            ⏳ រង់ចាំថ្ងៃរៀន {getRemainingTime(new Date(program.learning_start_at).getTime(), now)}
+                                        </button>
+                                    </div>
+                                {:else if course.has_pre_test && !preTestDoneCourses.includes(String(course.id))}
                                     <!-- បង្ហាញ Pre-test និងបិទមេរៀន -->
                                     <button class="btn btn-primary btn-sm w-full shadow-md shadow-primary/20 relative z-10" on:click|stopPropagation={() => dispatch('startQuiz', {id: course.id, type: 'pre'})}>
                                         {t('take_pre_test')}

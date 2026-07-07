@@ -59,6 +59,61 @@
         return true;
     });
 
+    const defaultProgramConfig = {
+        access_mode: 'open_access',
+        pricing_type: 'free',
+        price: 0,
+        currency: 'KHR',
+        capacity: null,
+        registration_open_at: null,
+        registration_close_at: null,
+        learning_start_at: null,
+        learning_end_at: null,
+        payment_instructions: '',
+        require_payment_approval: true,
+        require_attendance: false,
+        require_test_pass: true,
+        require_evaluation: true,
+        certificate_enabled: true
+    };
+
+    function programConfigFor(course) {
+        return {
+            ...defaultProgramConfig,
+            ...(course?.cert_config?.program || {})
+        };
+    }
+
+    function normalizeProgramConfig(config = {}) {
+        const normalized = { ...defaultProgramConfig, ...config };
+        normalized.price = Number(normalized.price || 0);
+        normalized.capacity = normalized.capacity === '' || normalized.capacity === undefined ? null : normalized.capacity;
+        if (normalized.access_mode === 'open_access') {
+            normalized.pricing_type = 'free';
+            normalized.price = 0;
+            normalized.require_payment_approval = false;
+        }
+        if (normalized.pricing_type === 'free') {
+            normalized.price = 0;
+            normalized.require_payment_approval = false;
+        }
+        return normalized;
+    }
+
+    function formatProgramPrice(program) {
+        const amount = Number(program?.price || 0);
+        return `${amount.toLocaleString()} ${program?.currency || 'KHR'}`;
+    }
+
+    function updateProgramConfig(updates) {
+        editingCourse.cert_config = editingCourse.cert_config || {};
+        editingCourse.cert_config.program = normalizeProgramConfig({
+            ...(editingCourse.cert_config.program || {}),
+            ...updates
+        });
+        editingCourse = { ...editingCourse };
+    }
+
     async function loadPickerFiles(reset = false) {
         if (reset) { pickerFiles = []; pickerCursor = null; }
         pickerLoading = true;
@@ -417,6 +472,7 @@
 
         // Initialize Certificate Config (កំណត់តម្លៃដើមសម្រាប់លិខិតបញ្ជាក់)
         if (!editingCourse.cert_config) editingCourse.cert_config = {};
+        const programConfig = normalizeProgramConfig(editingCourse.cert_config.program);
         const certDefaults = {
             name: { x: 500, y: 300, fontSize: 50, color: '#000000', font: 'Arial', fontWeight: 'bold', align: 'center' },
             name_latin: { x: 500, y: 400, fontSize: 30, color: '#000000', font: 'Arial', fontWeight: 'bold', align: 'center' },
@@ -425,10 +481,12 @@
         };
         
         editingCourse.cert_config = {
+            ...editingCourse.cert_config,
             name: { ...certDefaults.name, ...(editingCourse.cert_config.name || {}) },
             name_latin: { ...certDefaults.name_latin, ...(editingCourse.cert_config.name_latin || {}) },
             qr: { ...certDefaults.qr, ...(editingCourse.cert_config.qr || {}) },
-            id: { ...certDefaults.id, ...(editingCourse.cert_config.id || {}) }
+            id: { ...certDefaults.id, ...(editingCourse.cert_config.id || {}) },
+            program: programConfig
         };
 
         // Format dates for input
@@ -485,6 +543,11 @@
         if (!editingCourse.title) return alert("សូមបញ្ចូលចំណងជើងវគ្គសិក្សា!");
 
         loading = true;
+
+        editingCourse.cert_config = {
+            ...(editingCourse.cert_config || {}),
+            program: normalizeProgramConfig(editingCourse.cert_config?.program)
+        };
         
         // STRICT WHITELIST: Only send columns that exist in the 'courses' table
         const payload = {
@@ -744,6 +807,7 @@
 
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {#each filteredCourses as course (course.id)}
+            {@const program = programConfigFor(course)}
             <div class="card bg-base-100 shadow-sm border border-base-300 hover:shadow-md transition-all group">
                 <figure class="h-40 bg-gray-100 relative overflow-hidden">
                     {#if course.thumbnail_url || course.cover_url}
@@ -757,6 +821,18 @@
                 </figure>
                 <div class="card-body p-4">
                     <h3 class="font-bold text-lg text-base-content line-clamp-1">{course.title}</h3>
+                    <div class="flex flex-wrap gap-1.5">
+                        {#if program.access_mode === 'program_enrollment'}
+                            <span class="badge badge-sm badge-primary">ត្រូវចុះឈ្មោះ</span>
+                            {#if program.pricing_type === 'paid'}
+                                <span class="badge badge-sm badge-warning">{formatProgramPrice(program)}</span>
+                            {:else}
+                                <span class="badge badge-sm badge-success">Free</span>
+                            {/if}
+                        {:else}
+                            <span class="badge badge-sm badge-ghost">Open Access</span>
+                        {/if}
+                    </div>
                     
                     <div class="flex justify-between items-center mt-2">
                         <div class="text-xs text-gray-500">ពិន្ទុជាប់: {course.passing_score}%</div>
@@ -791,30 +867,33 @@
 <!-- Modal -->
 {#if showModal}
     <div class="modal modal-open bg-black/40" transition:fade={{ duration: 200 }}>
-        <div class="modal-box w-11/12 max-w-4xl bg-base-100 p-0 overflow-hidden rounded-2xl flex flex-col max-h-[90vh]">
+        <div class="modal-box w-11/12 max-w-6xl bg-base-100 p-0 overflow-hidden rounded-2xl flex flex-col max-h-[92vh]">
             <!-- Header -->
             <div class="bg-base-200 px-6 py-4 border-b border-base-300 flex justify-between items-center shrink-0">
-                <h3 class="font-bold text-lg text-base-content">{editingCourse.id ? 'កែប្រែវគ្គសិក្សា' : 'បង្កើតវគ្គសិក្សាថ្មី'}</h3>
+                <div>
+                    <h3 class="font-bold text-lg text-base-content">{editingCourse.id ? 'កែប្រែវគ្គសិក្សា' : 'បង្កើតវគ្គសិក្សាថ្មី'}</h3>
+                    <p class="text-xs text-gray-500 mt-0.5">រៀបចំព័ត៌មានវគ្គ ការចុះឈ្មោះ មេរៀន និងលិខិតបញ្ជាក់</p>
+                </div>
                 <button on:click={() => showModal = false} class="rounded-full w-8 h-8 hover:bg-gray-100 flex items-center justify-center cursor-pointer border-0 outline-none text-gray-500"><XIcon class="w-5 h-5" /></button>
             </div>
 
             <div class="p-6 overflow-y-auto flex-1">
                 <!-- Tabs -->
-                <div class="flex p-1 bg-gray-100 rounded-xl mb-6 border border-gray-200 relative">
-                    <button class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'general' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}" 
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-1 p-1 bg-gray-100 rounded-xl mb-6 border border-gray-200 relative">
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'general' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}" 
                        on:click={() => switchCourseTab('general')}>
                        <FileTextIcon class="w-4 h-4 mr-1 inline" /> ព័ត៌មានទូទៅ
                     </button>
-                    <button class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'lessons_questions' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'lessons_questions' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
                        on:click={() => switchCourseTab('lessons_questions')}>
                        <BookOpenIcon class="w-4 h-4 mr-1 inline" /> មេរៀន & សំណួរ
                     </button>
-                    <button class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'certificate' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'certificate' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
                        on:click={() => switchCourseTab('certificate')}>
                        <AwardIcon class="w-4 h-4 mr-1 inline" /> លិខិតបញ្ជាក់
                     </button>
                     {#if editingCourse.id}
-                    <button class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'participants' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}"
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'participants' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}"
                        on:click={() => switchCourseTab('participants')}>
                        <UsersIcon class="w-4 h-4 mr-1 inline" /> អ្នកចូលរួម
                     </button>
@@ -823,162 +902,295 @@
 
                 <!-- Tab Content: General -->
                 {#if activeTab === 'general'}
-                    <div class="space-y-5">
-                        <!-- Main Info Section -->
-                        <div class="bg-base-100 p-5 rounded-2xl border border-base-300 shadow-sm">
-                            <div class="form-control w-full mb-4">
-                                <label class="label font-bold text-base-content text-base pb-1">
-                                    ចំណងជើងវគ្គសិក្សា <span class="text-red-500 ml-1">*</span>
-                                </label>
-                                <input bind:value={editingCourse.title} class="input input-bordered w-full bg-base-100 text-base-content focus:ring-2 focus:ring-primary/50 rounded-xl text-lg shadow-sm" placeholder="ឧ. វគ្គបណ្តុះបណ្តាល..." />
-                            </div>
-                            
-                            <div class="form-control w-full">
-                                <label class="label font-bold text-base-content pb-1">ការពិពណ៌នា</label>
-                                <textarea bind:value={editingCourse.description} class="textarea textarea-bordered w-full bg-base-100 text-base-content h-24 focus:ring-2 focus:ring-primary/50 rounded-xl text-base leading-relaxed shadow-sm" placeholder="ពន្យល់សង្ខេបអំពីវគ្គសិក្សា..."></textarea>
-                            </div>
-                        </div>
-
-                        <!-- Metrics Grid -->
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div class="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
-                                <label class="label font-bold text-gray-700 text-xs uppercase tracking-wider">រយៈពេល (Duration)</label>
-                                <input bind:value={editingCourse.duration} class="input input-bordered w-full bg-white text-gray-900 rounded-lg h-10" placeholder="ឧ. 2 ម៉ោង" />
-                            </div>
-                            <div class="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
-                                <label class="label font-bold text-gray-700 text-xs uppercase tracking-wider">ពិន្ទុ CPD</label>
-                                <input type="number" bind:value={editingCourse.cpd_points} class="input input-bordered w-full bg-white text-gray-900 rounded-lg h-10" placeholder="0" />
-                            </div>
-                            <div class="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
-                                <label class="label font-bold text-gray-700 text-xs uppercase tracking-wider">រង់ចាំ (Cooldown - នាទី)</label>
-                                <input type="number" bind:value={editingCourse.quiz_cooldown} class="input input-bordered w-full bg-white text-gray-900 rounded-lg h-10" placeholder="60" />
-                            </div>
-                        </div>
-
-                        <!-- Evaluation Form -->
-                        <div class="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex flex-col gap-2 shadow-sm">
-                            <label class="font-bold text-blue-800 flex items-center gap-2 text-sm">
-                                📝 ទម្រង់វាយតម្លៃ (Evaluation Form)
-                            </label>
-                            <div class="flex gap-2">
-                                <select bind:value={editingCourse.evaluation_form_id} class="select select-bordered w-full bg-white text-gray-900 rounded-xl h-10 min-h-0">
-                                    <option value={null}>-- មិនតម្រូវ (None) --</option>
-                                    {#each evaluationForms as form}
-                                        <option value={form.id}>{form.title} {form.is_published ? '' : '(Draft)'}</option>
-                                    {/each}
-                                </select>
-                                <button class="w-10 h-10 flex items-center justify-center bg-white border border-gray-300 rounded-xl hover:bg-gray-50 cursor-pointer shrink-0" style="color: #4b5563;" on:click={loadEvaluationForms} title="Refresh">
-                                    <RefreshCwIcon class="w-4 h-4" />
-                                </button>
-                            </div>
-                            {#if evaluationForms.length === 0}
-                                <div class="text-error text-xs mt-1">⚠️ មិនមាន Form ទេ។ សូមទៅបង្កើត Form ក្នុងម៉ឺនុយ "បែបបទ (Forms)" ជាមុនសិន។</div>
-                            {/if}
-                        </div>
-
-                        <!-- Toggles Grid -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition">
-                                <span class="font-bold text-gray-700 text-sm">ដាក់ឱ្យដំណើរការ (Publish)</span>
-                                <input type="checkbox" bind:checked={editingCourse.is_published} class="toggle toggle-success toggle-sm" />
-                            </label>
-                            
-                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition">
-                                <span class="font-bold text-gray-700 text-sm">បង្ហាញនៅទំព័រមុខ (Featured)</span>
-                                <input type="checkbox" bind:checked={editingCourse.is_featured} class="toggle toggle-warning toggle-sm" />
-                            </label>
-
-                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition">
-                                <span class="font-bold text-gray-700 text-sm">មានតេស្តដើមវគ្គ (Pre-test)</span>
-                                <input type="checkbox" bind:checked={editingCourse.has_pre_test} class="toggle toggle-info toggle-sm" />
-                            </label>
-                            
-                             <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition">
-                                <div>
-                                    <span class="font-bold text-gray-700 block text-sm">អនុញ្ញាតឱ្យទាញយក (Download)</span>
-                                    <span class="text-xs text-gray-500">សិស្សអាចទាញយកឯកសារមេរៀនបាន</span>
+                    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-5 items-start">
+                        <div class="space-y-4">
+                            <section class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                                <div class="flex items-center justify-between gap-3 mb-4">
+                                    <div>
+                                        <h4 class="font-bold text-gray-900">ព័ត៌មានវគ្គសិក្សា</h4>
+                                        <p class="text-xs text-gray-500 mt-1">ចំណុចសំខាន់ដែលសមាជិកនឹងឃើញនៅទំព័រមុខ</p>
+                                    </div>
+                                    <span class="badge badge-sm {editingCourse.is_published ? 'badge-success' : 'badge-ghost'}">
+                                        {editingCourse.is_published ? 'Published' : 'Draft'}
+                                    </span>
                                 </div>
-                                <input type="checkbox" bind:checked={editingCourse.allow_download} class="toggle toggle-secondary toggle-sm" />
-                            </label>
 
-                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition">
-                                <div>
-                                    <span class="font-bold text-gray-700 block text-sm">បើកមេរៀន (Lessons)</span>
-                                    <span class="text-xs text-gray-500">សិស្សអាចចូលអានមេរៀនបាន</span>
-                                </div>
-                                <input type="checkbox" bind:checked={editingCourse.lessons_enabled} class="toggle toggle-primary toggle-sm" />
-                            </label>
-                        </div>
+                                <div class="space-y-4">
+                                    <div class="form-control w-full">
+                                        <label class="label font-bold text-base-content text-base pb-1">
+                                            ចំណងជើងវគ្គសិក្សា <span class="text-red-500 ml-1">*</span>
+                                        </label>
+                                        <input bind:value={editingCourse.title} class="input input-bordered w-full bg-white text-gray-900 rounded-xl text-lg" placeholder="ឧ. វគ្គបណ្តុះបណ្តាល..." />
+                                    </div>
 
-                        <!-- Post-test Scheduling -->
-                        <div class="bg-orange-50 p-4 rounded-2xl border border-orange-100 space-y-3 shadow-sm">
-                            <h4 class="font-bold text-orange-800 flex items-center gap-2 text-sm">⏱️ ការកំណត់ម៉ោង Post-test</h4>
-                            <div class="flex flex-col sm:flex-row gap-3">
-                                <div class="form-control flex-1">
-                                    <label class="label py-1">
-                                        <span class="label-text font-medium text-gray-600 text-xs">🔓 ម៉ោង/ថ្ងៃបើក Post-test</span>
-                                        <span class="label-text-alt text-xs text-gray-400">ទុកទទេ = បើកភ្លាម</span>
-                                    </label>
-                                    <input type="datetime-local" bind:value={editingCourse.post_test_fixed_date}
-                                        class="input input-bordered input-sm w-full bg-white" />
-                                    {#if editingCourse.post_test_fixed_date}
-                                        <button class="btn btn-xs btn-ghost text-red-400 mt-1 w-fit" on:click={() => editingCourse.post_test_fixed_date = null}>✕ លុបចេញ</button>
-                                    {/if}
+                                    <div class="form-control w-full">
+                                        <label class="label font-bold text-base-content pb-1">ការពិពណ៌នា</label>
+                                        <textarea bind:value={editingCourse.description} class="textarea textarea-bordered w-full bg-white text-gray-900 h-28 rounded-xl text-base leading-relaxed" placeholder="ពន្យល់សង្ខេបអំពីវគ្គសិក្សា..."></textarea>
+                                    </div>
                                 </div>
-                                <div class="form-control flex-1">
-                                    <label class="label py-1">
-                                        <span class="label-text font-medium text-gray-600 text-xs">🔒 ម៉ោង/ថ្ងៃបិទ Post-test</span>
-                                        <span class="label-text-alt text-xs text-gray-400">ទុកទទេ = គ្មានកំណត់</span>
-                                    </label>
-                                    <input type="datetime-local" bind:value={editingCourse.post_test_auto_close_date}
-                                        class="input input-bordered input-sm w-full bg-white" />
-                                    {#if editingCourse.post_test_auto_close_date}
-                                        <button class="btn btn-xs btn-ghost text-red-400 mt-1 w-fit" on:click={() => editingCourse.post_test_auto_close_date = null}>✕ លុបចេញ</button>
-                                    {/if}
-                                </div>
-                            </div>
-                            {#if editingCourse.post_test_fixed_date || editingCourse.post_test_auto_close_date}
-                            <div class="text-xs text-orange-700 bg-orange-100 px-3 py-2 rounded-lg leading-relaxed">
-                                {#if editingCourse.post_test_fixed_date && editingCourse.post_test_auto_close_date}
-                                    📅 Post-test បើក <strong>{new Date(editingCourse.post_test_fixed_date).toLocaleString('km-KH')}</strong> → បិទ <strong>{new Date(editingCourse.post_test_auto_close_date).toLocaleString('km-KH')}</strong>
-                                {:else if editingCourse.post_test_fixed_date}
-                                    📅 Post-test នឹងបើក <strong>{new Date(editingCourse.post_test_fixed_date).toLocaleString('km-KH')}</strong>
-                                {:else}
-                                    📅 Post-test នឹងបិទ <strong>{new Date(editingCourse.post_test_auto_close_date).toLocaleString('km-KH')}</strong>
-                                {/if}
-                            </div>
-                            {/if}
-                        </div>
+                            </section>
 
-                        <!-- File Uploads -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div class="form-control w-full">
-                                <label class="label font-bold text-gray-700 pb-1">ឯកសារមេរៀន (PDF/Link)</label>
-                                <div class="flex gap-2">
-                                    <input bind:value={editingCourse.pdf_url} class="input input-bordered w-full bg-white text-gray-900 rounded-xl" placeholder="https://..." />
-                                    <button class="w-10 h-10 flex items-center justify-center rounded-xl border border-gray-300 bg-white hover:bg-blue-50 cursor-pointer shrink-0" style="color: #0099cc;" on:click={() => openFilePicker('course_pdf')} title="ជ្រើសរើសពឹក័លំ">
-                                        <FolderOpenIcon class="w-5 h-5" />
+                            <section class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                    <div>
+                                        <h4 class="font-bold text-gray-900">ការចូលរៀន និងការចុះឈ្មោះ</h4>
+                                        <p class="text-xs text-gray-500 mt-1">ជ្រើសរើសថាវគ្គនេះចូលរៀនភ្លាម ឬត្រូវចុះឈ្មោះជាមុន</p>
+                                    </div>
+                                    <span class="badge {editingCourse.cert_config.program.access_mode === 'program_enrollment' ? 'badge-primary' : 'badge-ghost'}">
+                                        {editingCourse.cert_config.program.access_mode === 'program_enrollment' ? 'Registration Flow' : 'Open Access'}
+                                    </span>
+                                </div>
+
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <button type="button"
+                                        class="text-left p-4 rounded-xl border transition {editingCourse.cert_config.program.access_mode === 'open_access' ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-gray-200 hover:border-primary/40'}"
+                                        on:click={() => updateProgramConfig({ access_mode: 'open_access' })}>
+                                        <span class="font-bold text-gray-900 block">Open Access</span>
+                                        <span class="text-xs text-gray-500 mt-1 block">សមាជិកអាចចូលវគ្គបានភ្លាម ដូចវគ្គចាស់ៗ</span>
                                     </button>
-                                    <label class="w-10 h-10 flex items-center justify-center rounded-xl cursor-pointer shrink-0" style="background-color: #0056b3; color: white;" title="Upload PDF">
-                                        <UploadIcon class="w-5 h-5" />
-                                        <input type="file" class="hidden" accept="application/pdf" on:change={(e) => handleUpload(e, 'pdf_url', 'lessons')} />
-                                    </label>
-                                </div>
-                                <label class="label text-xs text-gray-500 pt-1">ដាក់ Link YouTube ឬ Google Drive ក៏បាន</label>
-                            </div>
-                            <div class="form-control w-full">
-                                <label class="label font-bold text-gray-700 pb-1">រូបភាព Cover</label>
-                                <div class="flex gap-2">
-                                    <input type="file" accept=".jpg,.jpeg,.png" on:change={(e) => handleUpload(e, 'thumbnail_url')} class="file-input file-input-bordered w-full bg-white text-gray-900 rounded-xl" />
-                                    <button class="w-10 h-10 flex items-center justify-center rounded-xl border border-gray-300 bg-white hover:bg-blue-50 cursor-pointer shrink-0" style="color: #0099cc;" on:click={() => openFilePicker('thumbnail_url')} title="ជ្រើសរើសពឹក័លំ">
-                                        <FolderOpenIcon class="w-5 h-5" />
+                                    <button type="button"
+                                        class="text-left p-4 rounded-xl border transition {editingCourse.cert_config.program.access_mode === 'program_enrollment' ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-gray-200 hover:border-primary/40'}"
+                                        on:click={() => updateProgramConfig({ access_mode: 'program_enrollment' })}>
+                                        <span class="font-bold text-gray-900 block">ត្រូវចុះឈ្មោះជាមុន</span>
+                                        <span class="text-xs text-gray-500 mt-1 block">ប្រើសម្រាប់វគ្គថ្មីដែលមានថ្ងៃរៀន ឬការបង់ប្រាក់</span>
                                     </button>
                                 </div>
-                                {#if editingCourse.thumbnail_url}
-                                    <img src={normalizeAssetUrl(editingCourse.thumbnail_url, PUBLIC_R2_PUBLIC_URL)} alt="Cover" class="mt-2 h-32 w-full object-cover rounded-xl border border-gray-200" />
+
+                                {#if editingCourse.cert_config.program.access_mode === 'program_enrollment'}
+                                    <div class="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-4">
+                                        <div>
+                                            <label class="label font-bold text-gray-700 pb-2">ប្រភេទតម្លៃ</label>
+                                            <div class="join w-full">
+                                                <button type="button"
+                                                    class="join-item btn btn-sm flex-1 {editingCourse.cert_config.program.pricing_type === 'free' ? 'btn-primary text-white' : 'btn-outline'}"
+                                                    on:click={() => updateProgramConfig({ pricing_type: 'free' })}>
+                                                    Free
+                                                </button>
+                                                <button type="button"
+                                                    class="join-item btn btn-sm flex-1 {editingCourse.cert_config.program.pricing_type === 'paid' ? 'btn-warning text-white' : 'btn-outline'}"
+                                                    on:click={() => updateProgramConfig({ pricing_type: 'paid' })}>
+                                                    Paid
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">តម្លៃ</span></label>
+                                                <input type="number" min="0" bind:value={editingCourse.cert_config.program.price}
+                                                    disabled={editingCourse.cert_config.program.pricing_type !== 'paid'}
+                                                    class="input input-bordered input-sm w-full bg-white" placeholder="0" />
+                                            </div>
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">រូបិយប័ណ្ណ</span></label>
+                                                <select bind:value={editingCourse.cert_config.program.currency}
+                                                    disabled={editingCourse.cert_config.program.pricing_type !== 'paid'}
+                                                    class="select select-bordered select-sm w-full bg-white">
+                                                    <option value="KHR">KHR</option>
+                                                    <option value="USD">USD</option>
+                                                </select>
+                                            </div>
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ចំនួនកំណត់</span></label>
+                                                <input type="number" min="0" bind:value={editingCourse.cert_config.program.capacity}
+                                                    class="input input-bordered input-sm w-full bg-white" placeholder="ទុកទទេ = មិនកំណត់" />
+                                            </div>
+                                        </div>
+
+                                        {#if editingCourse.cert_config.program.pricing_type === 'paid'}
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">របៀបបង់ប្រាក់ / ការណែនាំ</span></label>
+                                                <textarea bind:value={editingCourse.cert_config.program.payment_instructions}
+                                                    class="textarea textarea-bordered w-full bg-white h-20 text-sm"
+                                                    placeholder="ឧ. ផ្ញើទៅ ABA/ACLEDA... បន្ទាប់មក upload រូបបង្កាន់ដៃ"></textarea>
+                                            </div>
+                                        {/if}
+
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ថ្ងៃបើកចុះឈ្មោះ</span></label>
+                                                <input type="datetime-local" bind:value={editingCourse.cert_config.program.registration_open_at} class="input input-bordered input-sm w-full bg-white" />
+                                            </div>
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ថ្ងៃបិទចុះឈ្មោះ</span></label>
+                                                <input type="datetime-local" bind:value={editingCourse.cert_config.program.registration_close_at} class="input input-bordered input-sm w-full bg-white" />
+                                            </div>
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ថ្ងៃចាប់ផ្តើមរៀន</span></label>
+                                                <input type="datetime-local" bind:value={editingCourse.cert_config.program.learning_start_at} class="input input-bordered input-sm w-full bg-white" />
+                                            </div>
+                                            <div class="form-control">
+                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ថ្ងៃបញ្ចប់រៀន</span></label>
+                                                <input type="datetime-local" bind:value={editingCourse.cert_config.program.learning_end_at} class="input input-bordered input-sm w-full bg-white" />
+                                            </div>
+                                        </div>
+
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200">
+                                                <span class="font-bold text-gray-700 text-sm">Admin approve payment</span>
+                                                <input type="checkbox" bind:checked={editingCourse.cert_config.program.require_payment_approval}
+                                                    disabled={editingCourse.cert_config.program.pricing_type !== 'paid'}
+                                                    class="toggle toggle-warning toggle-sm" />
+                                            </label>
+                                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200">
+                                                <span class="font-bold text-gray-700 text-sm">ត្រូវមានវត្តមាន</span>
+                                                <input type="checkbox" bind:checked={editingCourse.cert_config.program.require_attendance} class="toggle toggle-info toggle-sm" />
+                                            </label>
+                                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200">
+                                                <span class="font-bold text-gray-700 text-sm">ត្រូវប្រឡងជាប់</span>
+                                                <input type="checkbox" bind:checked={editingCourse.cert_config.program.require_test_pass} class="toggle toggle-success toggle-sm" />
+                                            </label>
+                                            <label class="flex items-center justify-between bg-white p-3 px-4 rounded-xl border border-gray-200">
+                                                <span class="font-bold text-gray-700 text-sm">ត្រូវវាយតម្លៃមុនយក Certificate</span>
+                                                <input type="checkbox" bind:checked={editingCourse.cert_config.program.require_evaluation} class="toggle toggle-primary toggle-sm" />
+                                            </label>
+                                        </div>
+                                    </div>
                                 {/if}
-                            </div>
+                            </section>
+
+                            <details class="bg-white rounded-xl border border-gray-200 shadow-sm">
+                                <summary class="px-5 py-4 cursor-pointer font-bold text-gray-900 flex items-center justify-between">
+                                    <span>ការកំណត់ម៉ោង Post-test</span>
+                                    <span class="text-xs font-normal text-gray-500">Optional</span>
+                                </summary>
+                                <div class="px-5 pb-5 space-y-3">
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div class="form-control">
+                                            <label class="label py-1">
+                                                <span class="label-text font-medium text-gray-600 text-xs">ម៉ោង/ថ្ងៃបើក Post-test</span>
+                                                <span class="label-text-alt text-xs text-gray-400">ទុកទទេ = បើកភ្លាម</span>
+                                            </label>
+                                            <input type="datetime-local" bind:value={editingCourse.post_test_fixed_date}
+                                                class="input input-bordered input-sm w-full bg-white" />
+                                            {#if editingCourse.post_test_fixed_date}
+                                                <button class="btn btn-xs btn-ghost text-red-400 mt-1 w-fit" on:click={() => editingCourse.post_test_fixed_date = null}>លុបចេញ</button>
+                                            {/if}
+                                        </div>
+                                        <div class="form-control">
+                                            <label class="label py-1">
+                                                <span class="label-text font-medium text-gray-600 text-xs">ម៉ោង/ថ្ងៃបិទ Post-test</span>
+                                                <span class="label-text-alt text-xs text-gray-400">ទុកទទេ = គ្មានកំណត់</span>
+                                            </label>
+                                            <input type="datetime-local" bind:value={editingCourse.post_test_auto_close_date}
+                                                class="input input-bordered input-sm w-full bg-white" />
+                                            {#if editingCourse.post_test_auto_close_date}
+                                                <button class="btn btn-xs btn-ghost text-red-400 mt-1 w-fit" on:click={() => editingCourse.post_test_auto_close_date = null}>លុបចេញ</button>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                    {#if editingCourse.post_test_fixed_date || editingCourse.post_test_auto_close_date}
+                                        <div class="text-xs text-orange-700 bg-orange-50 border border-orange-100 px-3 py-2 rounded-lg leading-relaxed">
+                                            {#if editingCourse.post_test_fixed_date && editingCourse.post_test_auto_close_date}
+                                                Post-test បើក <strong>{new Date(editingCourse.post_test_fixed_date).toLocaleString('km-KH')}</strong> → បិទ <strong>{new Date(editingCourse.post_test_auto_close_date).toLocaleString('km-KH')}</strong>
+                                            {:else if editingCourse.post_test_fixed_date}
+                                                Post-test នឹងបើក <strong>{new Date(editingCourse.post_test_fixed_date).toLocaleString('km-KH')}</strong>
+                                            {:else}
+                                                Post-test នឹងបិទ <strong>{new Date(editingCourse.post_test_auto_close_date).toLocaleString('km-KH')}</strong>
+                                            {/if}
+                                        </div>
+                                    {/if}
+                                </div>
+                            </details>
                         </div>
+
+                        <aside class="space-y-4 xl:sticky xl:top-0">
+                            <section class="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                                <div>
+                                    <h4 class="font-bold text-gray-900">ការកំណត់រហ័ស</h4>
+                                    <p class="text-xs text-gray-500 mt-1">កំណត់ស្ថានភាព និងលក្ខខណ្ឌសំខាន់ៗ</p>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="form-control">
+                                        <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">រយៈពេល</span></label>
+                                        <input bind:value={editingCourse.duration} class="input input-bordered input-sm w-full bg-white" placeholder="ឧ. 2 ម៉ោង" />
+                                    </div>
+                                    <div class="form-control">
+                                        <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ពិន្ទុ CPD</span></label>
+                                        <input type="number" bind:value={editingCourse.cpd_points} class="input input-bordered input-sm w-full bg-white" placeholder="0" />
+                                    </div>
+                                </div>
+
+                                <div class="form-control">
+                                    <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">Cooldown Post-test (នាទី)</span></label>
+                                    <input type="number" bind:value={editingCourse.quiz_cooldown} class="input input-bordered input-sm w-full bg-white" placeholder="60" />
+                                </div>
+
+                                <div class="form-control">
+                                    <label class="label py-1"><span class="label-text font-bold text-gray-700 text-xs">ទម្រង់វាយតម្លៃ</span></label>
+                                    <div class="flex gap-2">
+                                        <select bind:value={editingCourse.evaluation_form_id} class="select select-bordered select-sm w-full bg-white text-gray-900">
+                                            <option value={null}>មិនតម្រូវ</option>
+                                            {#each evaluationForms as form}
+                                                <option value={form.id}>{form.title} {form.is_published ? '' : '(Draft)'}</option>
+                                            {/each}
+                                        </select>
+                                        <button class="btn btn-sm btn-outline" on:click={loadEvaluationForms} title="Refresh">
+                                            <RefreshCwIcon class="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                    {#if evaluationForms.length === 0}
+                                        <div class="text-error text-xs mt-1">មិនមាន Form ទេ។ សូមបង្កើត Form ជាមុនសិន។</div>
+                                    {/if}
+                                </div>
+
+                                <div class="space-y-2">
+                                    <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
+                                        <span class="font-bold text-gray-700 text-sm">Publish</span>
+                                        <input type="checkbox" bind:checked={editingCourse.is_published} class="toggle toggle-success toggle-sm" />
+                                    </label>
+                                    <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
+                                        <span class="font-bold text-gray-700 text-sm">Featured</span>
+                                        <input type="checkbox" bind:checked={editingCourse.is_featured} class="toggle toggle-warning toggle-sm" />
+                                    </label>
+                                    <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
+                                        <span class="font-bold text-gray-700 text-sm">Pre-test</span>
+                                        <input type="checkbox" bind:checked={editingCourse.has_pre_test} class="toggle toggle-info toggle-sm" />
+                                    </label>
+                                    <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
+                                        <span class="font-bold text-gray-700 text-sm">Download</span>
+                                        <input type="checkbox" bind:checked={editingCourse.allow_download} class="toggle toggle-secondary toggle-sm" />
+                                    </label>
+                                    <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
+                                        <span class="font-bold text-gray-700 text-sm">Lessons</span>
+                                        <input type="checkbox" bind:checked={editingCourse.lessons_enabled} class="toggle toggle-primary toggle-sm" />
+                                    </label>
+                                </div>
+                            </section>
+
+                            <details class="bg-white rounded-xl border border-gray-200 shadow-sm" open>
+                                <summary class="px-4 py-3 cursor-pointer font-bold text-gray-900">ឯកសារ និងរូបភាព</summary>
+                                <div class="px-4 pb-4 space-y-4">
+                                    <div class="form-control w-full">
+                                        <label class="label font-bold text-gray-700 pb-1">ឯកសារមេរៀន (PDF/Link)</label>
+                                        <div class="flex gap-2">
+                                            <input bind:value={editingCourse.pdf_url} class="input input-bordered input-sm w-full bg-white text-gray-900 rounded-lg" placeholder="https://..." />
+                                            <button class="btn btn-sm btn-outline" on:click={() => openFilePicker('course_pdf')} title="ជ្រើសរើសឯកសារ">
+                                                <FolderOpenIcon class="w-4 h-4" />
+                                            </button>
+                                            <label class="btn btn-sm btn-primary text-white" title="Upload PDF">
+                                                <UploadIcon class="w-4 h-4" />
+                                                <input type="file" class="hidden" accept="application/pdf" on:change={(e) => handleUpload(e, 'pdf_url', 'lessons')} />
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-control w-full">
+                                        <label class="label font-bold text-gray-700 pb-1">រូបភាព Cover</label>
+                                        <div class="flex gap-2">
+                                            <input type="file" accept=".jpg,.jpeg,.png" on:change={(e) => handleUpload(e, 'thumbnail_url')} class="file-input file-input-bordered file-input-sm w-full bg-white text-gray-900 rounded-lg" />
+                                            <button class="btn btn-sm btn-outline" on:click={() => openFilePicker('thumbnail_url')} title="ជ្រើសរើសរូបភាព">
+                                                <FolderOpenIcon class="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                        {#if editingCourse.thumbnail_url}
+                                            <img src={normalizeAssetUrl(editingCourse.thumbnail_url, PUBLIC_R2_PUBLIC_URL)} alt="Cover" class="mt-2 h-28 w-full object-cover rounded-lg border border-gray-200" />
+                                        {/if}
+                                    </div>
+                                </div>
+                            </details>
+                        </aside>
                     </div>
                 {/if}
 
