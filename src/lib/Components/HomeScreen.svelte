@@ -1,7 +1,7 @@
 <script>
     import { fade, fly, scale } from 'svelte/transition';
     import { elasticOut } from 'svelte/easing';
-    import { createEventDispatcher, onMount } from 'svelte';
+    import { createEventDispatcher, onMount, tick } from 'svelte';
     import LessonPlayer from './admin/LessonPlayer.svelte';
     import PwaInstallBanner from './PwaInstallBanner.svelte';
     import FloatingAssistant from './FloatingAssistant.svelte';
@@ -47,6 +47,7 @@
     let couponMessages = {};
     let couponLoading = {};
     let courseRegistrationLoading = {};
+    let courseActionMessages = {};
     let showPaymentModal = false;
     let selectedPaymentCourse = null;
     let paymentProofFile = null;
@@ -301,6 +302,17 @@
         };
     }
 
+    function setCourseActionMessage(course, message, type = 'success') {
+        courseActionMessages = {
+            ...courseActionMessages,
+            [String(course.id)]: { message, type }
+        };
+    }
+
+    function courseActionMessage(course) {
+        return courseActionMessages[String(course.id)] || null;
+    }
+
     function courseEnrollmentStatus(course) {
         return courseEnrollment(course)?.status || null;
     }
@@ -445,7 +457,7 @@
                 }
             });
 
-            alert('បានផ្ញើបង្កាន់ដៃរួច។ សូមរង់ចាំ Admin approve។');
+            setCourseActionMessage(selectedPaymentCourse, 'បានផ្ញើបង្កាន់ដៃរួច។ សូមរង់ចាំ Admin approve។', 'success');
             closePaymentModal();
         } catch (error) {
             alert('មានបញ្ហាក្នុងការ upload បង្កាន់ដៃ: ' + error.message);
@@ -594,8 +606,11 @@
 
         setCourseRegistrationLoading(course, true);
         saveCourseEnrollments(next);
+        setCourseActionMessage(course, 'បានចុះឈ្មោះរួច កំពុងរក្សាទុកទៅ Server...', 'info');
+        await tick();
 
         if (status === 'pending_payment') {
+            setCourseActionMessage(course, 'បានចុះឈ្មោះរួច សូមបង់ប្រាក់ និង upload បង្កាន់ដៃ', 'success');
             openPaymentModal(course);
         }
 
@@ -609,15 +624,15 @@
         setCourseRegistrationLoading(course, false);
 
         if (!saved) {
-            alert('បានបង្ហាញថាចុះឈ្មោះរួចក្នុងទូរស័ព្ទនេះ ប៉ុន្តែមិនទាន់រក្សាទុកទៅ Server។ សូមពិនិត្យ internet ឬប្រាប់ Admin។');
+            setCourseActionMessage(course, 'បានបង្ហាញថាចុះឈ្មោះរួចក្នុងទូរស័ព្ទនេះ ប៉ុន្តែមិនទាន់រក្សាទុកទៅ Server។ សូមពិនិត្យ internet ឬប្រាប់ Admin។', 'warning');
             return;
         }
 
         if (status === 'pending_payment') return;
         if (autoApprovedPayment) {
-            alert(`បានចុះឈ្មោះ និង approve ការបង់ប្រាក់រួចរាល់។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។${discountAmount > 0 ? `\nបញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}`);
+            setCourseActionMessage(course, `បានចុះឈ្មោះ និង approve ការបង់ប្រាក់រួចរាល់។${discountAmount > 0 ? ` បញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}`, 'success');
         } else {
-            alert('បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។');
+            setCourseActionMessage(course, 'បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។', 'success');
         }
     }
 
@@ -1006,6 +1021,14 @@
                             {/if}
                             
                             <div class="card-actions flex-col gap-2 mt-auto">
+                                {#if courseActionMessage(course)}
+                                    {@const actionMsg = courseActionMessage(course)}
+                                    <div class="w-full rounded-xl border px-3 py-2 text-xs font-bold text-center
+                                        {actionMsg.type === 'success' ? 'bg-green-50 border-green-200 text-green-700' : actionMsg.type === 'warning' ? 'bg-yellow-50 border-yellow-200 text-yellow-700' : 'bg-blue-50 border-blue-200 text-blue-700'}">
+                                        {actionMsg.message}
+                                    </div>
+                                {/if}
+
                                 {#if courseMeeting && !isCourseRegistrationRequired(course) && !(isProgramEnrollmentCourse(course) && isLearningTimeLocked(course))}
                                     <div class="w-full relative z-10" on:click|stopPropagation>
                                         {#if isJoinAvailable(courseMeeting)}
