@@ -154,7 +154,7 @@
     $: tabTitles = {
         dashboard: 'ទិដ្ឋភាពទូទៅ',
         courses: 'CPD Programs / វគ្គសិក្សា',
-        meetings: 'កាលវិភាគរៀន / ការប្រជុំ',
+        meetings: 'កាលវិភាគក្នុងវគ្គសិក្សា',
         registrations: 'ការចុះឈ្មោះ',
         forms: 'បែបបទ និងការវាយតម្លៃ',
         quiz_results: 'លទ្ធផលប្រឡង',
@@ -172,7 +172,7 @@
             description: 'ចំណុចធំសម្រាប់ flow ចុះឈ្មោះ រៀន ប្រឡង វាយតម្លៃ និងលិខិតបញ្ជាក់។',
             items: [
                 { tab: 'courses', label: 'Programs / Courses', note: 'វគ្គ, មេរៀន, លិខិតបញ្ជាក់', tone: 'amber', icon: 'book' },
-                { tab: 'meetings', label: 'Schedule / Meetings', note: 'ថ្ងៃរៀន និងតំណប្រជុំ', tone: 'purple', icon: 'calendar' },
+                { tab: 'meetings', label: 'Course Schedule', note: 'ថ្ងៃរៀន និង Zoom/Meet ក្នុងវគ្គ', tone: 'purple', icon: 'calendar' },
                 { tab: 'registrations', label: 'Registrations', note: 'អ្នកចុះឈ្មោះ និងវត្តមាន', tone: 'indigo', icon: 'users' },
                 { tab: 'quiz_results', label: 'Results', note: 'លទ្ធផលប្រឡង និងស្ថានភាពជាប់', tone: 'green', icon: 'check' },
                 { tab: 'forms', label: 'Evaluation Forms', note: 'Form វាយតម្លៃក្រោយជាប់', tone: 'blue', icon: 'form' },
@@ -462,7 +462,7 @@
 {/if}
 
     {#if adminTab === 'meetings'}
-        <MeetingManagement {supabase} on:refresh={refreshData} />
+        <MeetingManagement {supabase} {courses} on:refresh={refreshData} />
     {/if}
 
     {#if adminTab === 'courses'}

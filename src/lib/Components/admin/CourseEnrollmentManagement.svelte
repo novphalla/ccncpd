@@ -1,7 +1,7 @@
 <script>
     import { onMount } from 'svelte';
     import { slide } from 'svelte/transition';
-    import { CheckCircleIcon, ClockIcon, CreditCardIcon, DownloadIcon, PrinterIcon, RefreshCwIcon, SearchIcon, UsersIcon, XCircleIcon } from 'lucide-svelte';
+    import { CheckCircleIcon, ClockIcon, CreditCardIcon, DownloadIcon, PrinterIcon, RefreshCwIcon, SearchIcon, Trash2Icon, UsersIcon, XCircleIcon } from 'lucide-svelte';
 
     export let supabase;
     export let currentUser;
@@ -17,6 +17,14 @@
     let showSummary = true;
     let showFinance = true;
     let showCouponManager = false;
+    let showManualAdd = false;
+    let selectedEnrollmentIds = new Set();
+    let bulkLoading = false;
+    let manualCourseId = '';
+    let manualUserSearch = '';
+    let manualUserResults = [];
+    let manualAddLoading = false;
+    let manualAddMode = 'approved';
     let coupons = [];
     let couponLoading = false;
     let couponForm = {
@@ -36,6 +44,7 @@
     $: couponCourseOptions = courses?.length
         ? courses.map(course => ({ id: course.id, title: course.title }))
         : courseOptions;
+    $: manualCourse = courses?.find(course => String(course.id) === String(manualCourseId));
 
     $: enrollmentStats = {
         total: enrollments.length,
@@ -75,11 +84,24 @@
     $: demographicStats = buildDemographicStats(filteredEnrollments);
     $: financeStats = buildFinanceStats(filteredEnrollments);
     $: courseFinanceRows = buildCourseFinanceRows(filteredEnrollments);
+    $: selectedEnrollments = enrollments.filter(row => selectedEnrollmentIds.has(row.id));
+    $: selectedCount = selectedEnrollments.length;
+    $: allFilteredSelected = filteredEnrollments.length > 0 && filteredEnrollments.every(row => selectedEnrollmentIds.has(row.id));
 
     onMount(() => {
         loadEnrollments();
         loadCoupons();
     });
+
+    function programConfigFor(course) {
+        return {
+            access_mode: 'open_access',
+            pricing_type: 'free',
+            price: 0,
+            currency: 'KHR',
+            ...(course?.cert_config?.program || {})
+        };
+    }
 
     async function loadEnrollments() {
         loading = true;
@@ -148,6 +170,152 @@
             .eq('id', row.id);
 
         if (error) return alert('Error: ' + error.message);
+        await loadEnrollments();
+    }
+
+    function toggleEnrollmentSelection(id) {
+        if (selectedEnrollmentIds.has(id)) {
+            selectedEnrollmentIds.delete(id);
+        } else {
+            selectedEnrollmentIds.add(id);
+        }
+        selectedEnrollmentIds = new Set(selectedEnrollmentIds);
+    }
+
+    function toggleAllFiltered() {
+        if (allFilteredSelected) {
+            filteredEnrollments.forEach(row => selectedEnrollmentIds.delete(row.id));
+        } else {
+            filteredEnrollments.forEach(row => selectedEnrollmentIds.add(row.id));
+        }
+        selectedEnrollmentIds = new Set(selectedEnrollmentIds);
+    }
+
+    function clearSelection() {
+        selectedEnrollmentIds = new Set();
+    }
+
+    async function bulkUpdateEnrollments(status) {
+        const ids = selectedEnrollments.map(row => row.id);
+        if (ids.length === 0) return;
+
+        const label = status === 'approved' ? 'approve' : 'reject';
+        if (!confirm(`តើអ្នកចង់ ${label} ការចុះឈ្មោះចំនួន ${ids.length} មែនទេ?`)) return;
+
+        bulkLoading = true;
+        const updates = {
+            status,
+            payment_status: status === 'approved' ? 'approved' : 'rejected',
+            approved_at: status === 'approved' ? new Date().toISOString() : null,
+            approved_by: status === 'approved' ? currentUser?.id : null,
+            updated_at: new Date().toISOString()
+        };
+
+        const { error } = await supabase
+            .from('course_enrollments')
+            .update(updates)
+            .in('id', ids);
+
+        bulkLoading = false;
+        if (error) return alert('Error: ' + error.message);
+        clearSelection();
+        await loadEnrollments();
+    }
+
+    async function deleteEnrollment(row) {
+        const name = memberName(row);
+        const courseTitle = row.course?.title || 'វគ្គសិក្សានេះ';
+        if (!confirm(`តើអ្នកពិតជាចង់លុបការចុះឈ្មោះរបស់ "${name}" ចេញពី "${courseTitle}" មែនទេ?\n\nការលុបនេះមិនលុបគណនីសមាជិក ឬវគ្គសិក្សាទេ។`)) return;
+
+        const { error } = await supabase
+            .from('course_enrollments')
+            .delete()
+            .eq('id', row.id);
+
+        if (error) return alert('Error: ' + error.message);
+        selectedEnrollmentIds.delete(row.id);
+        selectedEnrollmentIds = new Set(selectedEnrollmentIds);
+        enrollments = enrollments.filter(item => item.id !== row.id);
+    }
+
+    async function bulkDeleteEnrollments() {
+        const ids = selectedEnrollments.map(row => row.id);
+        if (ids.length === 0) return;
+        if (!confirm(`តើអ្នកពិតជាចង់លុបការចុះឈ្មោះចំនួន ${ids.length} មែនទេ?\n\nការលុបនេះមិនលុបគណនីសមាជិក ឬវគ្គសិក្សាទេ។`)) return;
+
+        bulkLoading = true;
+        const { error } = await supabase
+            .from('course_enrollments')
+            .delete()
+            .in('id', ids);
+
+        bulkLoading = false;
+        if (error) return alert('Error: ' + error.message);
+        clearSelection();
+        enrollments = enrollments.filter(row => !ids.includes(row.id));
+    }
+
+    async function searchManualUsers() {
+        const query = manualUserSearch.trim().replace(/[,%]/g, '');
+        manualUserResults = [];
+        if (query.length < 2) return;
+
+        manualAddLoading = true;
+        const { data, error } = await supabase
+            .from('users')
+            .select('id, full_name, name_latin, phone_number, gender, profile_data')
+            .or(`full_name.ilike.%${query}%,name_latin.ilike.%${query}%,phone_number.ilike.%${query}%`)
+            .limit(10);
+
+        manualAddLoading = false;
+        if (error) return alert('Error: ' + error.message);
+        manualUserResults = data || [];
+    }
+
+    async function addManualEnrollment(user) {
+        if (!manualCourse) return alert('សូមជ្រើសវគ្គសិក្សាជាមុនសិន។');
+        if (!user?.id) return;
+
+        const program = programConfigFor(manualCourse);
+        const isPaid = program.pricing_type === 'paid';
+        const nowIso = new Date().toISOString();
+		const status = manualAddMode === 'pending_payment' && isPaid ? 'pending_payment' : 'approved';
+        const paymentStatus = !isPaid
+            ? 'not_required'
+            : manualAddMode === 'waived'
+                ? 'waived'
+                : manualAddMode === 'pending_payment'
+                    ? 'pending'
+                    : 'approved';
+
+        const payload = {
+            course_id: manualCourse.id,
+            user_id: user.id,
+            status,
+            pricing_type: program.pricing_type || 'free',
+            price: Number(program.price || 0),
+            original_price: Number(program.price || 0),
+            discount_amount: 0,
+            final_price: Number(program.price || 0),
+            currency: program.currency || 'KHR',
+            payment_status: paymentStatus,
+            waiver_reason: paymentStatus === 'waived' ? 'បន្ថែមដោយ Admin ក្រោយចូលរៀន/Zoom' : null,
+            waived_at: paymentStatus === 'waived' ? nowIso : null,
+            waived_by: paymentStatus === 'waived' ? currentUser?.id || null : null,
+            approved_at: status === 'approved' ? nowIso : null,
+            approved_by: status === 'approved' ? currentUser?.id || null : null,
+            registered_at: nowIso,
+            updated_at: nowIso
+        };
+
+        const { error } = await supabase
+            .from('course_enrollments')
+            .upsert(payload, { onConflict: 'course_id,user_id' });
+
+        if (error) return alert('Error: ' + error.message);
+        alert(`បានបន្ថែម "${user.full_name || user.name_latin || user.phone_number}" ចូលវគ្គ "${manualCourse.title}" រួចរាល់។`);
+        manualUserSearch = '';
+        manualUserResults = [];
         await loadEnrollments();
     }
 
@@ -436,7 +604,7 @@
     function exportEnrollmentReportCsv() {
         const headers = [
             'ល.រ', 'ឈ្មោះ', 'ឈ្មោះឡាតាំង', 'លេខទូរស័ព្ទ', 'ភេទ', 'តួនាទី', 'កន្លែងធ្វើការ', 'រាជធានី/ខេត្ត',
-            'វគ្គសិក្សា', 'ប្រភេទតម្លៃ', 'តម្លៃ', 'រូបិយប័ណ្ណ', 'Payment Status', 'ស្ថានភាព', 'ថ្ងៃចុះឈ្មោះ', 'ថ្ងៃ Approve', 'Admin Approve'
+            'វគ្គសិក្សា', 'ប្រភេទតម្លៃ', 'តម្លៃ', 'រូបិយប័ណ្ណ', 'Payment Status', 'Payment Reference', 'Payment Proof', 'ស្ថានភាព', 'ថ្ងៃចុះឈ្មោះ', 'ថ្ងៃ Approve', 'Admin Approve'
         ];
         const rows = filteredEnrollments.map((row, index) => [
             index + 1,
@@ -452,6 +620,8 @@
             row.price || 0,
             row.currency || '',
             row.payment_status || '',
+            row.payment_reference || '',
+            row.payment_proof_url || '',
             statusLabel(row),
             formatDate(row.registered_at),
             formatDate(row.approved_at),
@@ -1308,6 +1478,77 @@
     {:else}
         <section class="bg-base-100 border border-base-300 shadow-sm rounded-xl overflow-hidden">
             <div class="p-4 border-b border-base-300 bg-gray-50">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
+                    <div>
+                        <h4 class="font-bold text-gray-900">បញ្ជីអ្នកចុះឈ្មោះ</h4>
+                        <p class="text-xs text-gray-500 mt-1">ថ្ងៃបិទចុះឈ្មោះបិទតែអ្នកថ្មី។ Admin អាចបន្ថែមអ្នកដែលបានចូលរៀនតាម Zoom/Telegram ដោយដៃបាន។</p>
+                    </div>
+                    <button class="btn btn-sm {showManualAdd ? 'btn-primary' : 'btn-outline btn-primary'}" on:click={() => showManualAdd = !showManualAdd}>
+                        {showManualAdd ? 'បិទការបន្ថែមដោយដៃ' : '+ បន្ថែមអ្នកចុះឈ្មោះដោយដៃ'}
+                    </button>
+                </div>
+
+                {#if showManualAdd}
+                    <div class="mb-4 rounded-xl border border-primary/20 bg-white p-4">
+                        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_220px] gap-3">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div class="form-control">
+                                    <label class="label py-1"><span class="label-text font-bold text-gray-700">ជ្រើសវគ្គសិក្សា</span></label>
+                                    <select bind:value={manualCourseId} class="select select-bordered bg-white">
+                                        <option value="">-- ជ្រើសវគ្គ --</option>
+                                        {#each courses as course}
+                                            <option value={course.id}>{course.title}</option>
+                                        {/each}
+                                    </select>
+                                    {#if manualCourse}
+                                        {@const manualProgram = programConfigFor(manualCourse)}
+                                        <div class="text-xs text-gray-500 mt-1">
+                                            {manualProgram.pricing_type === 'paid' ? `Paid: ${formatCurrency(manualProgram.price, manualProgram.currency)}` : 'Free'} · អាចបន្ថែមបាន ទោះ registration បិទក៏ដោយ
+                                        </div>
+                                    {/if}
+                                </div>
+                                <div class="form-control">
+                                    <label class="label py-1"><span class="label-text font-bold text-gray-700">ស្ថានភាពបញ្ចូល</span></label>
+                                    <select bind:value={manualAddMode} class="select select-bordered bg-white">
+                                        <option value="approved">Approved / បានចូលរៀនហើយ</option>
+                                        <option value="waived">Approved + Waived payment</option>
+                                        <option value="pending_payment">Pending payment</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="rounded-xl bg-primary/5 border border-primary/10 p-3 text-xs text-gray-600">
+                                ប្រើសម្រាប់អ្នកដែលចូល Zoom តាម Telegram ប៉ុន្តែមិនបានចុះឈ្មោះក្នុង app មុនថ្ងៃបិទ។
+                            </div>
+                        </div>
+
+                        <div class="mt-3 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_120px] gap-2">
+                            <label class="input input-bordered bg-white flex items-center gap-2">
+                                <SearchIcon class="w-4 h-4 text-gray-400" />
+                                <input bind:value={manualUserSearch} type="text" class="grow" placeholder="ស្វែងរកសមាជិកតាមឈ្មោះ ឬលេខទូរស័ព្ទ..." on:keydown={(e) => e.key === 'Enter' && searchManualUsers()} />
+                            </label>
+                            <button class="btn btn-primary" on:click={searchManualUsers} disabled={manualAddLoading || manualUserSearch.trim().length < 2}>
+                                {manualAddLoading ? 'កំពុងរក...' : 'ស្វែងរក'}
+                            </button>
+                        </div>
+
+                        {#if manualUserResults.length > 0}
+                            <div class="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                                {#each manualUserResults as user}
+                                    <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 flex items-center justify-between gap-3">
+                                        <div class="min-w-0">
+                                            <div class="font-bold text-gray-900 truncate">{user.full_name || user.name_latin || 'មិនមានឈ្មោះ'}</div>
+                                            <div class="text-xs text-gray-500 truncate">{[user.phone_number, user.name_latin, user.gender].filter(Boolean).join(' · ')}</div>
+                                        </div>
+                                        <button class="btn btn-xs btn-success text-white" on:click={() => addManualEnrollment(user)} disabled={!manualCourseId || manualAddLoading}>
+                                            បន្ថែម
+                                        </button>
+                                    </div>
+                                {/each}
+                            </div>
+                        {/if}
+                    </div>
+                {/if}
+
                 <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-3">
                     <label class="input input-bordered bg-white flex items-center gap-2">
                         <SearchIcon class="w-4 h-4 text-gray-400" />
@@ -1333,10 +1574,43 @@
                     <div class="font-medium">មិនទាន់មានការចុះឈ្មោះតាម filter នេះទេ</div>
                 </div>
             {:else}
+                {#if selectedCount > 0}
+                    <div class="mx-4 mt-4 rounded-xl border border-primary/20 bg-primary/5 p-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                        <div class="font-bold text-primary">
+                            បានជ្រើស {selectedCount} ការចុះឈ្មោះ
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button class="btn btn-sm btn-success text-white" on:click={() => bulkUpdateEnrollments('approved')} disabled={bulkLoading}>
+                                <CheckCircleIcon class="w-4 h-4" />
+                                Approve ច្រើន
+                            </button>
+                            <button class="btn btn-sm btn-error text-white" on:click={() => bulkUpdateEnrollments('rejected')} disabled={bulkLoading}>
+                                <XCircleIcon class="w-4 h-4" />
+                                Reject ច្រើន
+                            </button>
+                            <button class="btn btn-sm btn-outline btn-error" on:click={bulkDeleteEnrollments} disabled={bulkLoading}>
+                                <Trash2Icon class="w-4 h-4" />
+                                លុបច្រើន
+                            </button>
+                            <button class="btn btn-sm btn-ghost" on:click={clearSelection} disabled={bulkLoading}>
+                                ដកជម្រើស
+                            </button>
+                        </div>
+                    </div>
+                {/if}
                 <div class="overflow-x-auto">
                     <table class="table table-zebra">
                         <thead class="bg-white">
                             <tr>
+                                <th class="w-10">
+                                    <input
+                                        type="checkbox"
+                                        class="checkbox checkbox-sm checkbox-primary"
+                                        checked={allFilteredSelected}
+                                        on:change={toggleAllFiltered}
+                                        aria-label="ជ្រើសទាំងអស់"
+                                    />
+                                </th>
                                 <th>សមាជិក</th>
                                 <th>វគ្គសិក្សា</th>
                                 <th>Payment</th>
@@ -1348,6 +1622,15 @@
                         <tbody>
                             {#each filteredEnrollments as row}
                                 <tr>
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            class="checkbox checkbox-sm checkbox-primary"
+                                            checked={selectedEnrollmentIds.has(row.id)}
+                                            on:change={() => toggleEnrollmentSelection(row.id)}
+                                            aria-label="ជ្រើសការចុះឈ្មោះ"
+                                        />
+                                    </td>
                                     <td class="min-w-56">
                                         <div class="flex items-center gap-3">
                                             <div class="avatar placeholder">
@@ -1375,6 +1658,15 @@
                                         {#if row.payment_status === 'waived'}
                                             <div class="text-xs text-purple-600 mt-1">Waived: {row.waiver_reason || '-'}</div>
                                         {/if}
+                                        {#if row.payment_reference}
+                                            <div class="text-xs font-mono text-gray-600 mt-1 break-all">Ref: {row.payment_reference}</div>
+                                        {/if}
+                                        {#if row.payment_proof_url}
+                                            <a href={row.payment_proof_url} target="_blank" rel="noreferrer"
+                                                class="btn btn-xs btn-outline btn-info mt-2">
+                                                មើលបង្កាន់ដៃ
+                                            </a>
+                                        {/if}
                                         <div class="text-xs text-gray-500 mt-1">{row.payment_status || '-'}</div>
                                     </td>
                                     <td>
@@ -1386,7 +1678,7 @@
                                     <td class="text-xs min-w-36">{formatDate(row.registered_at)}</td>
                                     <td class="text-right min-w-44">
                                         {#if row.status === 'pending_payment'}
-                                            <div class="flex justify-end gap-2">
+                                            <div class="flex flex-wrap justify-end gap-2">
                                                 <button class="btn btn-xs btn-success text-white" on:click={() => updateEnrollment(row, 'approved')}>
                                                     <CheckCircleIcon class="w-3 h-3" />
                                                     Approve
@@ -1398,9 +1690,13 @@
                                                 <button class="btn btn-xs btn-secondary text-white" on:click={() => waiveEnrollment(row)}>
                                                     Waive
                                                 </button>
+                                                <button class="btn btn-xs btn-outline btn-error" on:click={() => deleteEnrollment(row)}>
+                                                    <Trash2Icon class="w-3 h-3" />
+                                                    លុប
+                                                </button>
                                             </div>
                                         {:else}
-                                            <div class="flex justify-end gap-2">
+                                            <div class="flex flex-wrap justify-end gap-2">
                                                 <button class="btn btn-xs btn-outline" on:click={() => updateEnrollment(row, 'approved')} disabled={row.status === 'approved'}>
                                                     Mark Approved
                                                 </button>
@@ -1409,6 +1705,10 @@
                                                         Waive
                                                     </button>
                                                 {/if}
+                                                <button class="btn btn-xs btn-outline btn-error" on:click={() => deleteEnrollment(row)}>
+                                                    <Trash2Icon class="w-3 h-3" />
+                                                    លុប
+                                                </button>
                                             </div>
                                         {/if}
                                     </td>

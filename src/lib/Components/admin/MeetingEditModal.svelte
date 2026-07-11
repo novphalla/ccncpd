@@ -6,10 +6,11 @@
     export let meeting = null;
     export let forms = [];
     export let supabase;
+    export let courses = [];
 
     const dispatch = createEventDispatcher();
 
-    let newMeeting = { title: '', date: '', link: '', registration_form_id: null, is_published: true, join_available_at: '' };
+    let newMeeting = { title: '', date: '', link: '', registration_form_id: null, course_id: null, is_published: true, join_available_at: '' };
     let isSubmitting = false;
     let editingMeetingId = null;
 
@@ -31,6 +32,7 @@
             date: localIso,
             link: meeting.meeting_url,
             registration_form_id: meeting.registration_form_id,
+            course_id: meeting.course_id || null,
             is_published: meeting.is_published,
             join_available_at: joinLocalIso
         };
@@ -53,6 +55,7 @@
             scheduled_at: new Date(newMeeting.date).toISOString(),
             meeting_url: newMeeting.link,
             registration_form_id: newMeeting.registration_form_id || null,
+            course_id: newMeeting.course_id || null,
             is_published: newMeeting.is_published,
             join_available_at: newMeeting.join_available_at ? new Date(newMeeting.join_available_at).toISOString() : null
         };
@@ -90,6 +93,19 @@
             <div class="form-control w-full mb-2">
                 <label for="mm-link" class="label font-bold">តំណភ្ជាប់ (Link)</label>
                 <input id="mm-link" bind:value={newMeeting.link} placeholder="Zoom / Google Meet Link" class="input input-bordered w-full" />
+            </div>
+
+            <div class="form-control w-full mb-2">
+                <label for="mm-course" class="label font-bold">
+                    <span>ភ្ជាប់ជាមួយវគ្គសិក្សា</span>
+                    <span class="label-text-alt text-gray-400">ដើម្បីបង្ហាញជា “ចូលរៀន” ក្នុងវគ្គ</span>
+                </label>
+                <select id="mm-course" bind:value={newMeeting.course_id} class="select select-bordered w-full">
+                    <option value={null}>-- មិនភ្ជាប់វគ្គ --</option>
+                    {#each courses as course}
+                        <option value={course.id}>{course.title}</option>
+                    {/each}
+                </select>
             </div>
 
             <div class="form-control w-full mb-2">

@@ -735,19 +735,39 @@
         let data = [];
         try {
             let meetingsQuery = supabase.from('live_meetings')
-                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').is('deleted_at', null).gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
+                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at, course_id').is('deleted_at', null).gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
             if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
                 meetingsQuery = meetingsQuery.eq('is_published', true);
             }
-            ({ data } = await meetingsQuery);
+            const meetingsRes = await meetingsQuery;
+            if (meetingsRes.error && meetingsRes.error.message?.includes('course_id')) {
+                let fallbackQuery = supabase.from('live_meetings')
+                    .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').is('deleted_at', null).gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
+                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
+                    fallbackQuery = fallbackQuery.eq('is_published', true);
+                }
+                ({ data } = await fallbackQuery);
+            } else {
+                data = meetingsRes.data || [];
+            }
         } catch (e) {
             console.warn("Error fetching meetings (likely missing deleted_at), falling back...", e);
             let meetingsQuery = supabase.from('live_meetings')
-                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
+                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at, course_id').gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
             if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
                 meetingsQuery = meetingsQuery.eq('is_published', true);
             }
-            ({ data } = await meetingsQuery);
+            const meetingsRes = await meetingsQuery;
+            if (meetingsRes.error && meetingsRes.error.message?.includes('course_id')) {
+                let fallbackQuery = supabase.from('live_meetings')
+                    .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
+                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
+                    fallbackQuery = fallbackQuery.eq('is_published', true);
+                }
+                ({ data } = await fallbackQuery);
+            } else {
+                data = meetingsRes.data || [];
+            }
         }
 
         // Lazy load LessonPlayer component

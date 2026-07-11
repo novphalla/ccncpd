@@ -272,13 +272,20 @@
     function stopDrag() {
         if (draggingItem) saveCertHistory();
         draggingItem = null;
-        window.removeEventListener('mousemove', onDrag); window.removeEventListener('mouseup', stopDrag);
+        editingCourse = { ...editingCourse }; // Force Svelte to update parent binding
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('mousemove', onDrag); 
+            window.removeEventListener('mouseup', stopDrag);
+        }
     }
 
     function centerElement(key) {
-        if (!previewImageElement || !previewImageElement.naturalWidth) return alert("សូមរង់ចាំរូបភាព Load សិន");
+        if (!previewImageElement) return;
         editingCourse.cert_config[key].x = previewImageElement.naturalWidth / 2;
-        if (editingCourse.cert_config[key].align) editingCourse.cert_config[key].align = 'center';
+        if (editingCourse.cert_config[key].align !== undefined) {
+            editingCourse.cert_config[key].align = 'center';
+        }
+        editingCourse = { ...editingCourse };
         saveCertHistory();
     }
 
@@ -664,7 +671,7 @@
                 <span>🆔 លេខសម្គាល់ (Certificate ID)</span>
                 <div class="flex items-center gap-2 relative z-[2]" on:click|stopPropagation>
                     <span class="text-xs font-normal text-gray-500">បង្ហាញ</span>
-                    <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={editingCourse.cert_config.id.visible !== false} on:change={(e) => { editingCourse.cert_config.id.visible = e.target.checked; saveCertHistory(); }} />
+                    <input type="checkbox" class="toggle toggle-sm toggle-primary" checked={editingCourse.cert_config.id.visible !== false} on:change={(e) => { editingCourse.cert_config.id.visible = e.target.checked; editingCourse = { ...editingCourse }; saveCertHistory(); }} />
                 </div>
             </div>
             <div class="collapse-content"> 

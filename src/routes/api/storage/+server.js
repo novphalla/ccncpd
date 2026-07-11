@@ -132,6 +132,17 @@ export async function POST({ request, platform }) {
     // Sanitize folder path to prevent path traversal
     const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
     const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+
+    const userId = request.headers.get('X-User-Id');
+    if (safeFolder === 'payment_proofs') {
+        const anyUser = await getAnyAuthUser(request, userId, platform?.env?.SUPABASE_SERVICE_ROLE_KEY);
+        if (!anyUser) return json({ error: 'Unauthorized' }, { status: 401 });
+    } else {
+        const user = await getAuthUser(request, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
+            || (userId ? await getAuthUserAnon(userId) : null);
+        if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const fileName = `${safeFolder}/${Date.now()}_${Math.random().toString(36).substring(2, 10)}_${safeName}`;
 
     // Upload to R2

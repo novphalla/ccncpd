@@ -5,6 +5,7 @@
     import MeetingEditModal from './MeetingEditModal.svelte';
 
     const dispatch = createEventDispatcher();
+    export let courses = [];
     let adminMeetings = [];
     let meetingSearch = '';
     let showUpcomingOnly = false;
@@ -96,6 +97,11 @@
         showEditModal = true;
     }
 
+    function courseTitleFor(meeting) {
+        if (!meeting?.course_id) return '';
+        return courses.find(course => String(course.id) === String(meeting.course_id))?.title || '';
+    }
+
     async function duplicateMeeting(meeting) {
         if (!confirm(`តើអ្នកពិតជាចង់ចម្លងការប្រជុំ "${meeting.title}" ដែរឬទេ?`)) return;
 
@@ -110,6 +116,7 @@
             scheduled_at: tomorrow.toISOString(),
             meeting_url: meeting.meeting_url,
             registration_form_id: meeting.registration_form_id,
+            course_id: meeting.course_id || null,
             is_published: false // Default to draft for copy
         };
 
@@ -330,6 +337,7 @@
             scheduled_at: new Date().toISOString(),
             meeting_url: '',
             registration_form_id: null,
+            course_id: null,
             is_published: true,
             join_available_at: ''
         };
@@ -341,7 +349,8 @@
 <div class="card bg-base-100 p-5 shadow-md border border-base-300">
     <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
         <div>
-            <h3 class="font-bold text-xl text-gray-800">📅 គ្រប់គ្រងការប្រជុំ</h3>
+            <h3 class="font-bold text-xl text-gray-800">📅 កាលវិភាគរៀន / ចូលប្រជុំតាមវគ្គ</h3>
+            <p class="text-sm text-gray-500 mt-1">ភ្ជាប់ Zoom/Google Meet ទៅវគ្គសិក្សា ដើម្បីឲ្យ user ចូលតាមប៊ូតុង “ចូលរៀន” ក្នុងវគ្គតែមួយ។</p>
         </div>
         <div class="flex flex-wrap gap-2 w-full md:w-auto justify-end items-center">
             <button on:click={openCreateModal} class="btn btn-sm btn-primary shadow-sm hover:shadow-md">
@@ -405,12 +414,19 @@
     <div class="overflow-x-auto bg-base-100 rounded-xl border border-base-300">
         <table class="table table-xs w-full">
             <thead class="bg-base-200 text-base-content uppercase text-xs font-bold border-b border-base-300">
-                <tr><th>ប្រធានបទ</th><th>កាលបរិច្ឆេទ</th><th>តំណភ្ជាប់</th><th>Form ចុះឈ្មោះ</th><th>អ្នកចុះឈ្មោះ</th><th>ផ្សាយ</th><th class="text-right">សកម្មភាព</th></tr>
+                <tr><th>ប្រធានបទ</th><th>វគ្គសិក្សា</th><th>កាលបរិច្ឆេទ</th><th>តំណភ្ជាប់</th><th>Form ចុះឈ្មោះ</th><th>អ្នកចុះឈ្មោះ</th><th>ផ្សាយ</th><th class="text-right">សកម្មភាព</th></tr>
             </thead>
             <tbody >
                 {#each adminMeetings as m, i}
                     <tr class="group hover border-b border-base-200 last:border-none transition-colors" in:fade={{ duration: 200, delay: i * 30 }}>
                         <td class="font-bold text-gray-800" title={m.title}>{truncateText(m.title, 40)}</td>
+                        <td>
+                            {#if courseTitleFor(m)}
+                                <span class="badge badge-sm badge-primary text-white max-w-56 truncate">{courseTitleFor(m)}</span>
+                            {:else}
+                                <span class="badge badge-sm badge-ghost text-gray-400">មិនទាន់ភ្ជាប់វគ្គ</span>
+                            {/if}
+                        </td>
                         <td>{new Date(m.scheduled_at).toLocaleDateString()}</td>
                         <td>
                             {#if m.meeting_url}<button on:click={() => copyToClipboard(m.meeting_url)} class="btn btn-xs btn-ghost" title="ចម្លង">📋</button>{/if}
@@ -470,6 +486,7 @@
         meeting={selectedMeeting}
         {supabase}
         forms={forms}
+        {courses}
         on:close={({detail}) => { showEditModal = false; selectedMeeting = null; if(detail && detail.refresh) { fetchAdminMeetings(); dispatch('refresh'); } }}
     />
 {/if}

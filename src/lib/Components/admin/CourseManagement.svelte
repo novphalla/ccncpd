@@ -70,6 +70,12 @@
         learning_start_at: null,
         learning_end_at: null,
         payment_instructions: '',
+        payment_provider: 'manual_qr',
+        payment_account_name: '',
+        payment_account_number: '',
+        payment_qr_url: '',
+        visibility: 'public',
+        private_access_mode: 'invite_code',
         require_payment_approval: true,
         require_attendance: false,
         require_test_pass: true,
@@ -104,6 +110,16 @@
         const amount = Number(program?.price || 0);
         return `${amount.toLocaleString()} ${program?.currency || 'KHR'}`;
     }
+
+    let courseInviteCodes = [];
+    let inviteCodeLoading = false;
+    let newInviteCode = {
+        code: '',
+        description: '',
+        max_uses: '',
+        expires_at: '',
+        auto_enroll: false
+    };
 
     function updateProgramConfig(updates) {
         editingCourse.cert_config = editingCourse.cert_config || {};
@@ -316,6 +332,83 @@
         evaluationForms = data || [];
     }
 
+    function generateInviteCode() {
+        newInviteCode.code = String(Math.floor(1000 + Math.random() * 9000));
+        newInviteCode = { ...newInviteCode };
+    }
+
+    function updateInviteCodeInput(value) {
+        newInviteCode.code = String(value || '').replace(/\D/g, '').slice(0, 4);
+        newInviteCode = { ...newInviteCode };
+    }
+
+    async function loadCourseInviteCodes(courseId) {
+        if (!courseId) {
+            courseInviteCodes = [];
+            return;
+        }
+        inviteCodeLoading = true;
+        const { data, error } = await supabase
+            .from('course_invite_codes')
+            .select('*')
+            .eq('course_id', courseId)
+            .order('created_at', { ascending: false });
+        inviteCodeLoading = false;
+        if (error) {
+            if (error.code !== '42P01' && error.code !== 'PGRST205') alert('Error loading invite codes: ' + error.message);
+            courseInviteCodes = [];
+            return;
+        }
+        courseInviteCodes = data || [];
+    }
+
+    async function createInviteCode() {
+        if (!newInviteCode.code.trim()) generateInviteCode();
+
+        let courseId = editingCourse.id;
+        if (!courseId) {
+            const savedCourse = await persistCourse({ closeModal: false });
+            courseId = savedCourse?.id;
+            if (!courseId) return;
+        }
+
+        const payload = {
+            course_id: courseId,
+            code: newInviteCode.code.trim(),
+            description: newInviteCode.description || null,
+            max_uses: newInviteCode.max_uses === '' ? null : Number(newInviteCode.max_uses || 0),
+            expires_at: newInviteCode.expires_at ? new Date(newInviteCode.expires_at).toISOString() : null,
+            auto_enroll: newInviteCode.auto_enroll === true,
+            is_active: true,
+            created_by: currentUser?.id || null,
+            updated_at: new Date().toISOString()
+        };
+
+        inviteCodeLoading = true;
+        const { error } = await supabase.from('course_invite_codes').insert(payload);
+        inviteCodeLoading = false;
+        if (error) return alert('Error: ' + error.message);
+
+        newInviteCode = { code: '', description: '', max_uses: '', expires_at: '', auto_enroll: false };
+        await loadCourseInviteCodes(courseId);
+    }
+
+    async function toggleInviteCode(code) {
+        const { error } = await supabase
+            .from('course_invite_codes')
+            .update({ is_active: !code.is_active, updated_at: new Date().toISOString() })
+            .eq('id', code.id);
+        if (error) return alert('Error: ' + error.message);
+        await loadCourseInviteCodes(editingCourse.id);
+    }
+
+    async function deleteInviteCode(code) {
+        if (!confirm(`តើអ្នកពិតជាចង់លុប invite code "${code.code}" មែនទេ?`)) return;
+        const { error } = await supabase.from('course_invite_codes').delete().eq('id', code.id);
+        if (error) return alert('Error: ' + error.message);
+        await loadCourseInviteCodes(editingCourse.id);
+    }
+
     async function loadLessons(courseId) {
         if (!courseId) { editingLessons = []; return; }
         const { data } = await supabase.from('lessons').select('*').eq('course_id', courseId).order('sort_order', { ascending: true });
@@ -445,6 +538,7 @@
 
     function openModal(course = null) {
         loadEvaluationForms();
+        newInviteCode = { code: '', description: '', max_uses: '', expires_at: '', auto_enroll: false };
         editingCourse = course ? JSON.parse(JSON.stringify(course)) : {
             title: '',
             description: '',
@@ -498,6 +592,7 @@
         if (editingCourse.allow_download === undefined) editingCourse.allow_download = false;
         
         loadLessons(editingCourse.id);
+        loadCourseInviteCodes(editingCourse.id);
 
         activeTab = 'general';
         showModal = true;
@@ -539,7 +634,40 @@
         }
     }
 
-    async function saveCourse() {
+    async function handleProgramPaymentQrUpload(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!file.type.startsWith('image/')) {
+            alert("សូម Upload រូបភាព QR code តែប៉ុណ្ណោះ!");
+            e.target.value = '';
+            return;
+        }
+
+        loading = true;
+        const formData = new FormData();
+        const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+        formData.append('file', new File([file], safeName, { type: file.type }));
+        formData.append('folder', 'payment_qr');
+
+        try {
+            const res = await fetch('/api/storage', {
+                method: 'POST',
+                headers: { 'X-User-Id': currentUser?.id || '' },
+                body: formData
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+            updateProgramConfig({ payment_qr_url: data.publicUrl });
+        } catch (error) {
+            alert("Upload failed: " + error.message);
+        } finally {
+            loading = false;
+            e.target.value = '';
+        }
+    }
+
+    async function persistCourse({ closeModal = true } = {}) {
         if (!editingCourse.title) return alert("សូមបញ្ចូលចំណងជើងវគ្គសិក្សា!");
 
         loading = true;
@@ -581,15 +709,28 @@
             payload.id = editingCourse.id;
         }
 
-        const { error } = await supabase.from('courses').upsert(payload).select().single();
+        const { data, error } = await supabase.from('courses').upsert(payload).select().single();
         
         loading = false;
         if (error) {
             alert("Error: " + error.message);
+            return null;
         } else {
-            showModal = false;
+            if (data) {
+                editingCourse = {
+                    ...editingCourse,
+                    ...data,
+                    passing_score: data.quiz_passing_score ?? editingCourse.passing_score
+                };
+            }
+            if (closeModal) showModal = false;
             dispatch('refresh');
+            return data || editingCourse;
         }
+    }
+
+    async function saveCourse() {
+        await persistCourse({ closeModal: true });
     }
 
     async function togglePublish(course) {
@@ -764,10 +905,11 @@
         else dispatch('refresh');
     }
 
-    function switchCourseTab(tab) {
+    async function switchCourseTab(tab) {
         if (tab !== 'general' && !editingCourse.id) {
-            alert('សូមរក្សាទុកវគ្គសិក្សា (Save) ជាមុនសិន ទើបអាចបន្ថែមមេរៀន សំណួរ ឬលិខិតបញ្ជាក់បាន!');
-            return;
+            const savedCourse = await persistCourse({ closeModal: false });
+            if (!savedCourse?.id) return;
+            await loadLessons(savedCourse.id);
         }
         activeTab = tab;
         if (tab === 'participants' && editingCourse.id) {
@@ -884,11 +1026,11 @@
                        on:click={() => switchCourseTab('general')}>
                        <FileTextIcon class="w-4 h-4 mr-1 inline" /> ព័ត៌មានទូទៅ
                     </button>
-                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'lessons_questions' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'lessons_questions' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}"
                        on:click={() => switchCourseTab('lessons_questions')}>
                        <BookOpenIcon class="w-4 h-4 mr-1 inline" /> មេរៀន & សំណួរ
                     </button>
-                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'certificate' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'} {!editingCourse.id ? 'opacity-50 cursor-not-allowed' : ''}"
+                    <button class="py-2.5 rounded-lg text-sm font-bold transition-all {activeTab === 'certificate' ? 'bg-white text-primary shadow-sm border border-gray-200' : 'text-gray-500 hover:bg-gray-200/50'}"
                        on:click={() => switchCourseTab('certificate')}>
                        <AwardIcon class="w-4 h-4 mr-1 inline" /> លិខិតបញ្ជាក់
                     </button>
@@ -956,6 +1098,92 @@
                                     </button>
                                 </div>
 
+                                <div class="rounded-xl border border-gray-200 bg-white p-4 space-y-4">
+                                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                        <div>
+                                            <h5 class="font-bold text-gray-900">ការមើលឃើញវគ្គ</h5>
+                                            <p class="text-xs text-gray-500 mt-1">Private នឹងលាក់វគ្គពី user រហូតដល់គាត់បញ្ចូលលេខកូដលេខត្រឹមត្រូវ</p>
+                                        </div>
+                                        <span class="badge {editingCourse.cert_config.program.visibility === 'private' ? 'badge-error text-white' : 'badge-success text-white'}">
+                                            {editingCourse.cert_config.program.visibility === 'private' ? 'Private' : 'Public'}
+                                        </span>
+                                    </div>
+
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <button type="button"
+                                            class="text-left p-4 rounded-xl border transition {editingCourse.cert_config.program.visibility !== 'private' ? 'border-success bg-success/5 ring-1 ring-success/20' : 'border-gray-200 hover:border-success/40'}"
+                                            on:click={() => updateProgramConfig({ visibility: 'public' })}>
+                                            <span class="font-bold text-gray-900 block">Public</span>
+                                            <span class="text-xs text-gray-500 mt-1 block">អ្នកប្រើទាំងអស់អាចមើលឃើញវគ្គនេះ</span>
+                                        </button>
+                                        <button type="button"
+                                            class="text-left p-4 rounded-xl border transition {editingCourse.cert_config.program.visibility === 'private' ? 'border-error bg-error/5 ring-1 ring-error/20' : 'border-gray-200 hover:border-error/40'}"
+                                            on:click={() => updateProgramConfig({ visibility: 'private', private_access_mode: 'invite_code' })}>
+                                            <span class="font-bold text-gray-900 block">Private + លេខកូដ</span>
+                                            <span class="text-xs text-gray-500 mt-1 block">មើលឃើញតែអ្នកដែលមានលេខកូដ 4 ខ្ទង់</span>
+                                        </button>
+                                    </div>
+
+                                    {#if editingCourse.cert_config.program.visibility === 'private'}
+                                        <div class="rounded-xl border border-dashed border-error/30 bg-error/5 p-4 space-y-3">
+                                            <div class="flex flex-col lg:flex-row gap-2">
+                                                <input
+                                                    value={newInviteCode.code}
+                                                    on:input={(e) => updateInviteCodeInput(e.target.value)}
+                                                    inputmode="numeric"
+                                                    pattern="[0-9]*"
+                                                    maxlength="4"
+                                                    class="input input-sm input-bordered bg-white flex-1 font-mono text-lg tracking-widest"
+                                                    placeholder="ឧ. 1234"
+                                                />
+                                                <button type="button" class="btn btn-sm btn-outline" on:click={generateInviteCode}>Generate</button>
+                                                <input type="number" min="0" bind:value={newInviteCode.max_uses} class="input input-sm input-bordered bg-white w-full lg:w-32" placeholder="Max uses" />
+                                                <input type="datetime-local" bind:value={newInviteCode.expires_at} class="input input-sm input-bordered bg-white w-full lg:w-56" />
+                                            </div>
+                                            <div class="flex flex-col lg:flex-row gap-2">
+                                                <input bind:value={newInviteCode.description} class="input input-sm input-bordered bg-white flex-1" placeholder="ចំណាំ ឧ. សម្រាប់ក្រុម Nurse ខេត្ត..." />
+                                                <label class="flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm font-bold text-gray-700">
+                                                    <input type="checkbox" bind:checked={newInviteCode.auto_enroll} class="checkbox checkbox-xs checkbox-primary" />
+                                                    Auto enroll
+                                                </label>
+                                                <button type="button" class="btn btn-sm btn-error text-white" on:click={createInviteCode} disabled={inviteCodeLoading}>
+                                                    {inviteCodeLoading ? 'កំពុងរក្សាទុក...' : '+ បង្កើតលេខកូដ'}
+                                                </button>
+                                            </div>
+
+                                            <div class="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                                                <table class="table table-xs">
+                                                    <thead>
+                                                        <tr><th>Code</th><th>ប្រើប្រាស់</th><th>ផុតកំណត់</th><th>Auto</th><th>Status</th><th class="text-right">Action</th></tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {#each courseInviteCodes as code}
+                                                            <tr>
+                                                                <td class="font-mono font-bold">{code.code}</td>
+                                                                <td>{code.used_count || 0}{code.max_uses ? ` / ${code.max_uses}` : ''}</td>
+                                                                <td>{code.expires_at ? new Date(code.expires_at).toLocaleDateString('km-KH') : '-'}</td>
+                                                                <td>{code.auto_enroll ? 'Yes' : '-'}</td>
+                                                                <td>
+                                                                    <span class="badge badge-xs {code.is_active ? 'badge-success text-white' : 'badge-ghost'}">
+                                                                        {code.is_active ? 'Active' : 'Off'}
+                                                                    </span>
+                                                                </td>
+                                                                <td class="text-right whitespace-nowrap">
+                                                                    <button type="button" class="btn btn-xs btn-outline" on:click={() => navigator.clipboard?.writeText(code.code)}>Copy</button>
+                                                                    <button type="button" class="btn btn-xs btn-outline btn-warning" on:click={() => toggleInviteCode(code)}>{code.is_active ? 'បិទ' : 'បើក'}</button>
+                                                                    <button type="button" class="btn btn-xs btn-outline btn-error" on:click={() => deleteInviteCode(code)}>លុប</button>
+                                                                </td>
+                                                            </tr>
+                                                        {:else}
+                                                            <tr><td colspan="6" class="text-center text-gray-400 py-4">មិនទាន់មានលេខកូដទេ</td></tr>
+                                                        {/each}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    {/if}
+                                </div>
+
                                 {#if editingCourse.cert_config.program.access_mode === 'program_enrollment'}
                                     <div class="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-4">
                                         <div>
@@ -998,11 +1226,69 @@
                                         </div>
 
                                         {#if editingCourse.cert_config.program.pricing_type === 'paid'}
-                                            <div class="form-control">
-                                                <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">របៀបបង់ប្រាក់ / ការណែនាំ</span></label>
-                                                <textarea bind:value={editingCourse.cert_config.program.payment_instructions}
-                                                    class="textarea textarea-bordered w-full bg-white h-20 text-sm"
-                                                    placeholder="ឧ. ផ្ញើទៅ ABA/ACLEDA... បន្ទាប់មក upload រូបបង្កាន់ដៃ"></textarea>
+                                            <div class="space-y-3 rounded-2xl border border-amber-100 bg-amber-50/50 p-4">
+                                                <div class="flex items-center justify-between gap-3">
+                                                    <div>
+                                                        <div class="font-bold text-gray-800">QR បង់ប្រាក់តាមវគ្គ</div>
+                                                        <div class="text-xs text-gray-500">ប្រើសម្រាប់ manual payment មុនភ្ជាប់ API ធនាគារ</div>
+                                                    </div>
+                                                    <span class="badge badge-warning badge-sm">Manual QR</span>
+                                                </div>
+
+                                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                                    <div class="form-control">
+                                                        <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">Provider</span></label>
+                                                        <select bind:value={editingCourse.cert_config.program.payment_provider}
+                                                            class="select select-bordered select-sm w-full bg-white">
+                                                            <option value="manual_qr">Manual QR</option>
+                                                            <option value="khqr">KHQR / Bakong</option>
+                                                            <option value="aba">ABA</option>
+                                                            <option value="acleda">ACLEDA</option>
+                                                            <option value="wing">Wing</option>
+                                                        </select>
+                                                    </div>
+                                                    <div class="form-control">
+                                                        <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">ឈ្មោះគណនី</span></label>
+                                                        <input bind:value={editingCourse.cert_config.program.payment_account_name}
+                                                            class="input input-bordered input-sm w-full bg-white"
+                                                            placeholder="ឧ. CCN CPD" />
+                                                    </div>
+                                                    <div class="form-control">
+                                                        <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">លេខគណនី / Merchant</span></label>
+                                                        <input bind:value={editingCourse.cert_config.program.payment_account_number}
+                                                            class="input input-bordered input-sm w-full bg-white"
+                                                            placeholder="ឧ. 001 xxx xxx" />
+                                                    </div>
+                                                </div>
+
+                                                <div class="grid grid-cols-1 lg:grid-cols-[180px_minmax(0,1fr)] gap-3 items-start">
+                                                    <div class="rounded-xl border border-dashed border-amber-200 bg-white p-3 min-h-40 flex items-center justify-center">
+                                                        {#if editingCourse.cert_config.program.payment_qr_url}
+                                                            <img src={editingCourse.cert_config.program.payment_qr_url} alt="Payment QR" class="max-h-36 max-w-full object-contain rounded-lg" />
+                                                        {:else}
+                                                            <div class="text-center text-xs text-gray-400">
+                                                                <div class="text-3xl mb-2">QR</div>
+                                                                មិនទាន់មានរូប QR
+                                                            </div>
+                                                        {/if}
+                                                    </div>
+                                                    <div class="space-y-3">
+                                                        <div class="form-control">
+                                                            <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">QR image URL</span></label>
+                                                            <input bind:value={editingCourse.cert_config.program.payment_qr_url}
+                                                                class="input input-bordered input-sm w-full bg-white"
+                                                                placeholder="បញ្ចូល URL ឬ upload រូបខាងក្រោម" />
+                                                        </div>
+                                                        <input type="file" accept="image/*" on:change={handleProgramPaymentQrUpload}
+                                                            class="file-input file-input-bordered file-input-sm w-full bg-white" />
+                                                        <div class="form-control">
+                                                            <label class="label py-1"><span class="label-text font-medium text-gray-600 text-xs">របៀបបង់ប្រាក់ / ការណែនាំ</span></label>
+                                                            <textarea bind:value={editingCourse.cert_config.program.payment_instructions}
+                                                                class="textarea textarea-bordered w-full bg-white h-20 text-sm"
+                                                                placeholder="ឧ. ស្កេន QR ខាងលើ រួច upload រូបបង្កាន់ដៃ។ សូមដាក់ payment reference ក្នុង remark។"></textarea>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             </div>
                                         {/if}
 

@@ -45,6 +45,16 @@
     let couponInputs = {};
     let appliedCoupons = {};
     let couponMessages = {};
+    let showPaymentModal = false;
+    let selectedPaymentCourse = null;
+    let paymentProofFile = null;
+    let paymentProofNote = '';
+    let paymentProofUploading = false;
+    let unlockedCourseIds = new Set();
+    let unlockedUserId = null;
+    let inviteCodeInput = '';
+    let inviteCodeMessage = '';
+    let inviteCodeLoading = false;
 
     const defaultProgramConfig = {
         access_mode: 'open_access',
@@ -57,6 +67,12 @@
         learning_start_at: null,
         learning_end_at: null,
         payment_instructions: '',
+        payment_provider: 'manual_qr',
+        payment_account_name: '',
+        payment_account_number: '',
+        payment_qr_url: '',
+        visibility: 'public',
+        private_access_mode: 'invite_code',
         require_payment_approval: true,
         require_attendance: false,
         require_test_pass: true,
@@ -76,19 +92,25 @@
         loadCourseEnrollments();
     }
 
-    // Extract unique categories from courses
-    $: categories = ['All', ...new Set(courses.map(c => c.category).filter(Boolean))];
+    $: if (currentUser?.id && currentUser.id !== unlockedUserId) {
+        loadInviteUnlocks();
+    }
+
+    $: visibleCourses = courses.filter(course => canViewCourse(course));
+
+    // Extract unique categories from visible courses
+    $: categories = ['All', ...new Set(visibleCourses.map(c => c.category).filter(Boolean))];
     
     // Filter courses based on search and category
-    $: filteredCourses = courses.filter(c => {
+    $: filteredCourses = visibleCourses.filter(c => {
         const matchesSearch = c.title.toLowerCase().includes(searchTerm.toLowerCase());
         const matchesCategory = selectedCategory === 'All' || c.category === selectedCategory;
         return matchesSearch && matchesCategory;
     });
 
     // Filter for Featured Courses (Home Page)
-    $: featuredCourses = courses.filter(c => c.is_featured);
-    $: displayCourses = showAllCourses ? filteredCourses : (featuredCourses.length > 0 ? featuredCourses : courses.slice(0, 2));
+    $: featuredCourses = visibleCourses.filter(c => c.is_featured);
+    $: displayCourses = showAllCourses ? filteredCourses : (featuredCourses.length > 0 ? featuredCourses : visibleCourses.slice(0, 2));
 
     // Countdown timers — recomputes every second because `now` changes
     $: meetingCountdowns = Object.fromEntries(meetings.map(m => {
@@ -122,8 +144,96 @@
         };
     }
 
+    function isPrivateCourse(course) {
+        return programConfigFor(course).visibility === 'private';
+    }
+
+    function updateInviteCodeInput(value) {
+        inviteCodeInput = String(value || '').replace(/\D/g, '').slice(0, 4);
+    }
+
+    function canViewCourse(course) {
+        if (!isPrivateCourse(course)) return true;
+        if (currentUser?.role === 'admin' || currentUser?.role === 'owner') return true;
+        return unlockedCourseIds.has(String(course.id)) || Boolean(courseEnrollment(course));
+    }
+
     function enrollmentStorageKey() {
         return currentUser?.id ? `course_enrollments_${currentUser.id}` : null;
+    }
+
+    async function loadInviteUnlocks() {
+        unlockedUserId = currentUser?.id || null;
+        unlockedCourseIds = new Set();
+        if (!supabase || !unlockedUserId) return;
+
+        const { data, error } = await supabase
+            .from('course_invite_redemptions')
+            .select('course_id')
+            .eq('user_id', unlockedUserId);
+
+        if (error) {
+            if (error.code !== '42P01' && error.code !== 'PGRST205') {
+                console.warn('Could not load invite unlocks:', error.message);
+            }
+            return;
+        }
+        unlockedCourseIds = new Set((data || []).map(row => String(row.course_id)));
+    }
+
+    async function redeemInviteCode() {
+        const code = inviteCodeInput.trim();
+        inviteCodeMessage = '';
+        if (!code) {
+            inviteCodeMessage = 'សូមបញ្ចូលលេខកូដវគ្គ';
+            return;
+        }
+        if (!currentUser?.id) {
+            inviteCodeMessage = 'សូមចូលគណនីជាមុនសិន';
+            return;
+        }
+
+        inviteCodeLoading = true;
+        try {
+            const { data, error } = await supabase.rpc('redeem_course_invite_code', {
+                p_invite_code: code
+            });
+            if (error) throw error;
+
+            const invite = Array.isArray(data) ? data[0] : data;
+            if (!invite?.course_id) {
+                inviteCodeMessage = 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានបិទ';
+                return;
+            }
+
+            unlockedCourseIds = new Set([...unlockedCourseIds, String(invite.course_id)]);
+            inviteCodeInput = '';
+            showAllCourses = true;
+            searchTerm = '';
+            selectedCategory = 'All';
+
+            const unlockedCourse = courses.find(course => String(course.id) === String(invite.course_id));
+            inviteCodeMessage = unlockedCourse
+                ? `បានបើកវគ្គ "${unlockedCourse.title}" រួចរាល់`
+                : 'បានបើកវគ្គរួចរាល់ សូមទាញ refresh ប្រសិនបើមិនទាន់ឃើញ';
+
+            if (invite.auto_enroll && unlockedCourse && !courseEnrollment(unlockedCourse)) {
+                await handleCourseRegistration(unlockedCourse);
+            }
+        } catch (error) {
+            const message = error?.message || '';
+            if (message.includes('not open yet')) {
+                inviteCodeMessage = 'លេខកូដនេះមិនទាន់បើកប្រើទេ';
+            } else if (message.includes('expired')) {
+                inviteCodeMessage = 'លេខកូដនេះផុតកំណត់ហើយ';
+            } else if (message.includes('usage limit')) {
+                inviteCodeMessage = 'លេខកូដនេះប្រើគ្រប់ចំនួនកំណត់ហើយ';
+            } else {
+                inviteCodeMessage = 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានបិទ';
+            }
+        } finally {
+            inviteCodeLoading = false;
+        }
     }
 
     async function loadCourseEnrollments() {
@@ -141,7 +251,7 @@
         if (supabase) {
             const { data, error } = await supabase
                 .from('course_enrollments')
-                .select('course_id, status, pricing_type, price, original_price, discount_amount, final_price, currency, payment_status, coupon_code, registered_at')
+                .select('course_id, status, pricing_type, price, original_price, discount_amount, final_price, currency, payment_status, coupon_code, payment_reference, payment_provider, payment_proof_url, payment_note, payment_submitted_at, registered_at')
                 .eq('user_id', enrollmentUserId);
 
             if (!error && data) {
@@ -149,7 +259,13 @@
                 data.forEach(row => {
                     fromDb[String(row.course_id)] = row;
                 });
-                saveCourseEnrollments({ ...courseEnrollments, ...fromDb });
+                const synced = { ...courseEnrollments };
+                courses
+                    .filter(course => isProgramEnrollmentCourse(course))
+                    .forEach(course => {
+                        delete synced[String(course.id)];
+                    });
+                saveCourseEnrollments({ ...synced, ...fromDb });
             } else if (error && error.code !== '42P01' && error.code !== 'PGRST205') {
                 console.warn('Could not load course enrollments:', error.message);
             }
@@ -235,6 +351,92 @@
         return Math.max(0, Number(program.price || 0) - couponDiscountFor(course, program));
     }
 
+    function generatePaymentReference(course) {
+        const coursePart = String(course?.id || 'course').slice(0, 8).toUpperCase();
+        const userPart = String(currentUser?.id || 'user').slice(0, 8).toUpperCase();
+        const timePart = Date.now().toString(36).toUpperCase();
+        return `CPD-${coursePart}-${userPart}-${timePart}`;
+    }
+
+    function openPaymentModal(course) {
+        selectedPaymentCourse = course;
+        const enrollment = courseEnrollment(course);
+        paymentProofFile = null;
+        paymentProofNote = enrollment?.payment_note || '';
+        showPaymentModal = true;
+    }
+
+    function closePaymentModal() {
+        if (paymentProofUploading) return;
+        showPaymentModal = false;
+        selectedPaymentCourse = null;
+        paymentProofFile = null;
+        paymentProofNote = '';
+    }
+
+    async function storageAuthHeaders() {
+        const headers = { 'X-User-Id': currentUser?.id || '' };
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
+        return headers;
+    }
+
+    async function submitPaymentProof() {
+        if (!selectedPaymentCourse || !currentUser?.id || !supabase) return;
+        if (!paymentProofFile) return alert('សូម upload រូបបង្កាន់ដៃ ឬ PDF មុនសិន។');
+
+        const enrollment = courseEnrollment(selectedPaymentCourse);
+        if (!enrollment) return alert('មិនទាន់មានការចុះឈ្មោះសម្រាប់វគ្គនេះទេ។');
+
+        paymentProofUploading = true;
+        try {
+            const safeName = paymentProofFile.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+            const formData = new FormData();
+            formData.append('file', new File([paymentProofFile], safeName, { type: paymentProofFile.type }));
+            formData.append('folder', 'payment_proofs');
+
+            const uploadRes = await fetch('/api/storage', {
+                method: 'POST',
+                headers: await storageAuthHeaders(),
+                body: formData
+            });
+            const uploadData = await uploadRes.json();
+            if (!uploadRes.ok) throw new Error(uploadData.error || 'Upload failed');
+
+            const submittedAt = new Date().toISOString();
+            const updates = {
+                payment_proof_url: uploadData.publicUrl,
+                payment_note: paymentProofNote || null,
+                payment_submitted_at: submittedAt,
+                payment_provider: programConfigFor(selectedPaymentCourse).payment_provider || 'manual_qr',
+                updated_at: submittedAt
+            };
+
+            const { error } = await supabase
+                .from('course_enrollments')
+                .update(updates)
+                .eq('course_id', selectedPaymentCourse.id)
+                .eq('user_id', currentUser.id);
+
+            if (error) throw new Error(error.message);
+
+            saveCourseEnrollments({
+                ...courseEnrollments,
+                [String(selectedPaymentCourse.id)]: {
+                    ...enrollment,
+                    ...updates
+                }
+            });
+
+            alert('បានផ្ញើបង្កាន់ដៃរួច។ សូមរង់ចាំ Admin approve។');
+            closePaymentModal();
+        } catch (error) {
+            alert('មានបញ្ហាក្នុងការ upload បង្កាន់ដៃ: ' + error.message);
+        } finally {
+            paymentProofUploading = false;
+        }
+    }
+
     async function applyCoupon(course) {
         const code = (couponInputs[String(course.id)] || '').trim().toUpperCase();
         const program = programConfigFor(course);
@@ -298,6 +500,12 @@
                 payment_status: enrollment.payment_status || (enrollment.status === 'pending_payment' ? 'pending' : 'not_required'),
                 coupon_id: enrollment.coupon_id || null,
                 coupon_code: enrollment.coupon_code || null,
+                payment_reference: enrollment.payment_reference || null,
+                payment_provider: enrollment.payment_provider || null,
+                payment_proof_url: enrollment.payment_proof_url || null,
+                payment_note: enrollment.payment_note || null,
+                payment_submitted_at: enrollment.payment_submitted_at || null,
+                approved_at: enrollment.approved_at || null,
                 registered_at: enrollment.registered_at
             }, { onConflict: 'course_id,user_id' });
 
@@ -332,7 +540,9 @@
         const finalPrice = isPaid ? finalPriceFor(course, program) : 0;
         const coupon = couponFor(course);
         const needsPayment = isPaid && finalPrice > 0 && program.require_payment_approval;
-        const status = needsPayment ? 'pending_payment' : 'registered';
+        const autoApprovedPayment = isPaid && !needsPayment;
+        const status = needsPayment ? 'pending_payment' : autoApprovedPayment ? 'approved' : 'registered';
+        const paymentReference = needsPayment ? generatePaymentReference(course) : null;
         const enrollment = {
             status,
             pricing_type: program.pricing_type,
@@ -341,9 +551,12 @@
             discount_amount: discountAmount,
             final_price: finalPrice,
             currency: program.currency,
-            payment_status: needsPayment ? 'pending' : 'not_required',
+            payment_status: needsPayment ? 'pending' : autoApprovedPayment ? 'approved' : 'not_required',
             coupon_id: coupon?.id || null,
             coupon_code: coupon?.code || null,
+            payment_reference: paymentReference,
+            payment_provider: isPaid ? (program.payment_provider || 'manual_qr') : null,
+            approved_at: autoApprovedPayment ? new Date().toISOString() : null,
             registered_at: new Date().toISOString()
         };
 
@@ -361,7 +574,9 @@
         saveCourseEnrollments(next);
 
         if (status === 'pending_payment') {
-            alert(`បានចុះឈ្មោះរួច។ សូមបង់ប្រាក់ ${formatMoney(finalPrice, program.currency)} ហើយរង់ចាំ Admin approve។${discountAmount > 0 ? `\nបញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}${program.payment_instructions ? `\n\n${program.payment_instructions}` : ''}`);
+            openPaymentModal(course);
+        } else if (autoApprovedPayment) {
+            alert(`បានចុះឈ្មោះ និង approve ការបង់ប្រាក់រួចរាល់។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។${discountAmount > 0 ? `\nបញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}`);
         } else {
             alert('បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។');
         }
@@ -370,6 +585,25 @@
     function isJoinAvailable(meeting) {
         // null countdown means no gate set, OR gate has already passed → joinable
         return !meetingCountdowns[meeting.id];
+    }
+
+    function courseMeetingsFor(course) {
+        return meetings
+            .filter(meeting => meeting.course_id && String(meeting.course_id) === String(course.id))
+            .sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
+    }
+
+    function nextCourseMeetingFor(course) {
+        const courseMeetings = courseMeetingsFor(course);
+        if (!courseMeetings.length) return null;
+        const recentWindow = now - (6 * 60 * 60 * 1000);
+        return courseMeetings.find(meeting => new Date(meeting.scheduled_at).getTime() >= recentWindow) || courseMeetings[0];
+    }
+
+    function openCourseMeeting(meeting) {
+        if (!meeting?.meeting_url) return alert('វគ្គនេះមិនទាន់មានតំណ Zoom/Google Meet ទេ។');
+        dispatch('recordMeetingAttendance', meeting);
+        window.open(meeting.meeting_url, '_blank');
     }
 
     function getTimeBasedGreeting() {
@@ -580,94 +814,32 @@
             </a>
         {/if}
 
-        <!-- Meetings Section -->
-        {#if meetings.length > 0}
-            <div>
-                <h3 class="font-bold text-lg mb-3 flex items-center gap-2 text-gray-800">
-                    {t('upcoming_meetings')}
-                    <span class="badge badge-primary badge-sm text-white">{meetings.length}</span>
-                </h3>
-                <div class="carousel carousel-center w-full p-1 space-x-4 bg-transparent rounded-box">
-                    {#each meetings as meeting}
-                        <div class="carousel-item w-80">
-                            <div class="card w-80 bg-white shadow-md border border-gray-200 rounded-2xl overflow-hidden">
-                                <div class="h-2 bg-primary w-full"></div>
-                                <div class="card-body p-4">
-                                    <h2 class="card-title text-base line-clamp-3 leading-snug text-gray-800" title={meeting.title}>{meeting.title}</h2>
-                                    <div class="text-sm text-gray-500 flex flex-col gap-2 mt-2 bg-gray-50 p-2 rounded-lg">
-                                        <div class="flex items-center gap-2">
-                                            <span>🗓️</span>
-                                            {new Date(meeting.scheduled_at).toLocaleDateString('km-KH')}
-                                        </div>
-                                        <div class="flex items-center gap-2">
-                                            <span>⏰</span>
-                                            {new Date(meeting.scheduled_at).toLocaleTimeString('km-KH', {hour: '2-digit', minute:'2-digit'})}
-                                        </div>
-                                    </div>
-                                    <div class="card-actions justify-end mt-3">
-                                        {#if isRegistered(meeting.id)}
-                                            {#if isJoinAvailable(meeting)}
-                                                <button class="btn btn-primary btn-sm flex-1 shadow-md shadow-primary/20" on:click={() => {
-                                                    dispatch('recordMeetingAttendance', meeting);
-                                                    window.open(meeting.meeting_url, '_blank');
-                                                }}>
-                                                    {t('join_meeting')}
-                                                </button>
-                                            {:else}
-                                                {#if meetingCountdowns[meeting.id]}
-                                                {@const cd = meetingCountdowns[meeting.id]}
-                                                <div class="w-full flex flex-col items-center gap-2">
-                                                    <button class="btn btn-sm w-full opacity-50 cursor-not-allowed" disabled>
-                                                        🔒 {t('join_meeting')}
-                                                    </button>
-                                                    <div class="flex items-center justify-center gap-1 w-full">
-                                                        <div class="flex flex-col items-center bg-primary/10 rounded-lg px-2 py-1 min-w-[38px]">
-                                                            <span class="text-sm font-black text-primary leading-none">{String(cd.days).padStart(2,'0')}</span>
-                                                            <span class="text-[9px] text-gray-400 uppercase">ថ្ងៃ</span>
-                                                        </div>
-                                                        <span class="text-primary font-bold text-xs">:</span>
-                                                        <div class="flex flex-col items-center bg-primary/10 rounded-lg px-2 py-1 min-w-[38px]">
-                                                            <span class="text-sm font-black text-primary leading-none">{String(cd.hours).padStart(2,'0')}</span>
-                                                            <span class="text-[9px] text-gray-400 uppercase">ម៉ោង</span>
-                                                        </div>
-                                                        <span class="text-primary font-bold text-xs">:</span>
-                                                        <div class="flex flex-col items-center bg-primary/10 rounded-lg px-2 py-1 min-w-[38px]">
-                                                            <span class="text-sm font-black text-primary leading-none">{String(cd.minutes).padStart(2,'0')}</span>
-                                                            <span class="text-[9px] text-gray-400 uppercase">នាទី</span>
-                                                        </div>
-                                                        <span class="text-primary font-bold text-xs">:</span>
-                                                        <div class="flex flex-col items-center bg-primary/10 rounded-lg px-2 py-1 min-w-[38px]">
-                                                            <div class="relative h-5 overflow-hidden w-full flex justify-center">
-                                                                {#key cd.seconds}
-                                                                    <span class="absolute text-sm font-black text-primary leading-none"
-                                                                        in:fly={{ y: -14, duration: 250 }}
-                                                                        out:fly={{ y: 14, duration: 200 }}>
-                                                                        {String(cd.seconds).padStart(2,'0')}
-                                                                    </span>
-                                                                {/key}
-                                                            </div>
-                                                            <span class="text-[9px] text-gray-400 uppercase">វិនាទី</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                {/if}
-                                            {/if}
-                                        {:else}
-                                            <button class="btn btn-outline btn-primary btn-sm flex-1" on:click={() => dispatch('openMeetingRegistration', meeting)}>
-                                                {t('register')}
-                                            </button>
-                                        {/if}
-                                        <button class="btn btn-ghost btn-sm btn-square" title="ចែករំលែក" on:click={() => dispatch('shareMeeting', meeting)}>
-                                            🔗
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    {/each}
+        <div class="bg-white border border-blue-100 rounded-2xl p-3 shadow-sm">
+            <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm font-black text-gray-800">មានលេខកូដវគ្គសិក្សា?</div>
+                    <div class="text-xs text-gray-500 mt-0.5">បញ្ចូលលេខកូដដើម្បីបើកវគ្គ private</div>
+                </div>
+                <div class="flex gap-2 w-full sm:w-auto">
+                    <input
+                        value={inviteCodeInput}
+                        on:input={(e) => updateInviteCodeInput(e.target.value)}
+                        on:keydown={(e) => e.key === 'Enter' && redeemInviteCode()}
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        maxlength="4"
+                        class="input input-sm input-bordered bg-white flex-1 sm:w-40 font-mono text-lg tracking-widest"
+                        placeholder="1234"
+                    />
+                    <button class="btn btn-sm btn-primary" on:click={redeemInviteCode} disabled={inviteCodeLoading}>
+                        {inviteCodeLoading ? '...' : 'បើកវគ្គ'}
+                    </button>
                 </div>
             </div>
-        {/if}
+            {#if inviteCodeMessage}
+                <div class="text-xs mt-2 {inviteCodeMessage.startsWith('បាន') ? 'text-success' : 'text-error'}">{inviteCodeMessage}</div>
+            {/if}
+        </div>
 
         <!-- Courses Section -->
         <div>
@@ -718,6 +890,7 @@
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5" in:fade>
                 {#each displayCourses as course (course.id)}
                     {@const program = programConfigFor(course)}
+                    {@const courseMeeting = nextCourseMeetingFor(course)}
                     <div class="card bg-white shadow-sm hover:shadow-lg transition-all duration-200 overflow-hidden group rounded-2xl cursor-pointer border border-gray-200" on:click={() => handleCourseClick(course)}>
                         <figure class="h-44 bg-gray-100 relative overflow-hidden">
                             {#if course.thumbnail_url}
@@ -777,15 +950,44 @@
                                 <h2 class="card-title text-base font-bold line-clamp-2 min-h-[3rem] text-base-content leading-snug">{course.title}</h2>
                             </div>
                             <p class="text-xs text-base-content line-clamp-2 mb-4 h-8">{course.description || t('no_description')}</p>
+
+                            {#if courseMeeting}
+                                <div class="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 mb-3 text-xs text-blue-900">
+                                    <div class="font-bold flex items-center justify-between gap-2">
+                                        <span>កាលវិភាគរៀន</span>
+                                        <span class="badge badge-xs badge-info text-white">Zoom/Meet</span>
+                                    </div>
+                                    <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-blue-800">
+                                        <span>🗓️ {new Date(courseMeeting.scheduled_at).toLocaleDateString('km-KH')}</span>
+                                        <span>⏰ {new Date(courseMeeting.scheduled_at).toLocaleTimeString('km-KH', {hour: '2-digit', minute:'2-digit'})}</span>
+                                    </div>
+                                </div>
+                            {/if}
                             
                             <div class="card-actions flex-col gap-2 mt-auto">
+                                {#if courseMeeting && !isCourseRegistrationRequired(course) && !(isProgramEnrollmentCourse(course) && isLearningTimeLocked(course))}
+                                    <div class="w-full relative z-10" on:click|stopPropagation>
+                                        {#if isJoinAvailable(courseMeeting)}
+                                            <button class="btn btn-success btn-sm w-full text-white shadow-md shadow-success/20" on:click={() => openCourseMeeting(courseMeeting)} disabled={!courseMeeting.meeting_url}>
+                                                🎥 ចូលរៀន / ចូលប្រជុំ
+                                            </button>
+                                        {:else if meetingCountdowns[courseMeeting.id]}
+                                            {@const cd = meetingCountdowns[courseMeeting.id]}
+                                            <button class="btn btn-outline btn-sm w-full bg-gray-100 text-gray-500 border-gray-300" disabled>
+                                                🔒 ចូលរៀនបាននៅ {String(cd.days).padStart(2,'0')}ថ្ងៃ {String(cd.hours).padStart(2,'0')}ម៉ោង {String(cd.minutes).padStart(2,'0')}នាទី
+                                            </button>
+                                        {/if}
+                                    </div>
+                                {/if}
                                 {#if isCourseRegistrationRequired(course)}
                                     <div class="w-full relative z-10" on:click|stopPropagation>
                                         {#if isCoursePendingPayment(course)}
-                                            <button class="btn btn-warning btn-sm w-full text-white" disabled>
-                                                ⏳ រង់ចាំ Admin approve
+                                            <button class="btn btn-warning btn-sm w-full text-white" on:click={() => openPaymentModal(course)}>
+                                                {courseEnrollment(course)?.payment_proof_url ? '📤 មើល QR / ផ្ញើបង្កាន់ដៃម្ដងទៀត' : '💳 បង់ប្រាក់ / Upload បង្កាន់ដៃ'}
                                             </button>
-                                            <p class="text-[11px] text-warning mt-1 text-center">បង់ប្រាក់រួចហើយ សូមរង់ចាំការអនុម័ត</p>
+                                            <p class="text-[11px] text-warning mt-1 text-center">
+                                                {courseEnrollment(course)?.payment_proof_url ? 'បានផ្ញើបង្កាន់ដៃរួច សូមរង់ចាំការអនុម័ត' : 'ស្កេន QR ហើយ upload បង្កាន់ដៃ'}
+                                            </p>
                                         {:else if isCourseRegistrationClosed(course)}
                                             <button class="btn btn-outline btn-sm w-full bg-gray-100 text-red-500 border-gray-300" disabled>
                                                 ការចុះឈ្មោះបានបិទ
@@ -959,6 +1161,105 @@
 
 <!-- Tutorial Modal -->
 <TutorialModal bind:show={showTutorialModal} {tutorials} />
+
+{#if showPaymentModal && selectedPaymentCourse}
+    {@const paymentProgram = programConfigFor(selectedPaymentCourse)}
+    {@const paymentEnrollment = courseEnrollment(selectedPaymentCourse)}
+    <div class="modal modal-open z-[80]">
+        <div class="modal-box w-11/12 max-w-2xl bg-white rounded-2xl p-0 overflow-hidden">
+            <div class="bg-warning/10 border-b border-warning/20 p-5 flex items-start justify-between gap-4">
+                <div>
+                    <div class="text-xs font-bold uppercase tracking-wide text-warning">Course Payment</div>
+                    <h3 class="text-xl font-black text-gray-900 mt-1">{selectedPaymentCourse.title}</h3>
+                    <p class="text-sm text-gray-600 mt-1">ស្កេន QR បង់ប្រាក់ រួច upload បង្កាន់ដៃ ដើម្បីឲ្យ Admin approve។</p>
+                </div>
+                <button class="btn btn-sm btn-circle btn-ghost" on:click={closePaymentModal} disabled={paymentProofUploading}>✕</button>
+            </div>
+
+            <div class="p-5 grid grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] gap-5">
+                <div class="space-y-3">
+                    <div class="rounded-2xl border border-gray-200 bg-gray-50 p-3 min-h-60 flex items-center justify-center">
+                        {#if paymentProgram.payment_qr_url}
+                            <img src={paymentProgram.payment_qr_url} alt="Payment QR" class="max-w-full max-h-56 object-contain rounded-xl bg-white" />
+                        {:else}
+                            <div class="text-center text-gray-400">
+                                <div class="text-4xl mb-2">QR</div>
+                                <p class="text-sm">វគ្គនេះមិនទាន់បានដាក់ QR code</p>
+                            </div>
+                        {/if}
+                    </div>
+                    {#if paymentProgram.payment_account_name || paymentProgram.payment_account_number}
+                        <div class="rounded-xl bg-gray-50 border border-gray-200 p-3 text-sm">
+                            {#if paymentProgram.payment_account_name}
+                                <div class="flex justify-between gap-3">
+                                    <span class="text-gray-500">Account</span>
+                                    <strong class="text-right text-gray-800">{paymentProgram.payment_account_name}</strong>
+                                </div>
+                            {/if}
+                            {#if paymentProgram.payment_account_number}
+                                <div class="flex justify-between gap-3 mt-1">
+                                    <span class="text-gray-500">No.</span>
+                                    <strong class="text-right text-gray-800">{paymentProgram.payment_account_number}</strong>
+                                </div>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
+
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="rounded-xl bg-primary/5 border border-primary/10 p-3">
+                            <div class="text-xs text-gray-500">តម្លៃត្រូវបង់</div>
+                            <div class="text-xl font-black text-primary mt-1">{formatMoney(paymentEnrollment?.final_price || finalPriceFor(selectedPaymentCourse, paymentProgram), paymentProgram.currency)}</div>
+                        </div>
+                        <div class="rounded-xl bg-gray-50 border border-gray-200 p-3">
+                            <div class="text-xs text-gray-500">Provider</div>
+                            <div class="text-lg font-black text-gray-800 mt-1">{paymentProgram.payment_provider || 'manual_qr'}</div>
+                        </div>
+                    </div>
+
+                    <div class="rounded-xl border border-dashed border-warning/40 bg-warning/5 p-3">
+                        <div class="text-xs text-gray-500 mb-1">Payment Reference</div>
+                        <div class="font-mono font-black text-gray-900 break-all">{paymentEnrollment?.payment_reference || '-'}</div>
+                        <p class="text-[11px] text-gray-500 mt-2">សូមដាក់ reference នេះក្នុង remark/note ពេលផ្ទេរប្រាក់ ប្រសិនបើ app ធនាគារអនុញ្ញាត។</p>
+                    </div>
+
+                    {#if paymentProgram.payment_instructions}
+                        <div class="rounded-xl bg-blue-50 border border-blue-100 p-3 text-sm text-blue-900 whitespace-pre-line">
+                            {paymentProgram.payment_instructions}
+                        </div>
+                    {/if}
+
+                    {#if paymentEnrollment?.payment_proof_url}
+                        <a href={paymentEnrollment.payment_proof_url} target="_blank" rel="noreferrer" class="btn btn-outline btn-sm w-full">
+                            មើលបង្កាន់ដៃដែលបានផ្ញើរួច
+                        </a>
+                    {/if}
+
+                    <div class="space-y-2">
+                        <label class="text-sm font-bold text-gray-700">Upload បង្កាន់ដៃ</label>
+                        <input type="file" accept="image/*,.pdf" class="file-input file-input-bordered w-full bg-white"
+                            on:change={(e) => paymentProofFile = e.target.files?.[0] || null} />
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="text-sm font-bold text-gray-700">ចំណាំបន្ថែម</label>
+                        <textarea bind:value={paymentProofNote} class="textarea textarea-bordered w-full bg-white h-20"
+                            placeholder="ឧ. បានបង់ពី ABA ឈ្មោះ ... ម៉ោង ..."></textarea>
+                    </div>
+
+                    <div class="flex gap-2 justify-end pt-2">
+                        <button class="btn btn-ghost" on:click={closePaymentModal} disabled={paymentProofUploading}>បិទ</button>
+                        <button class="btn btn-warning text-white" on:click={submitPaymentProof} disabled={paymentProofUploading || !paymentProofFile}>
+                            {paymentProofUploading ? 'កំពុង Upload...' : 'ផ្ញើបង្កាន់ដៃ'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button class="modal-backdrop" on:click={closePaymentModal} disabled={paymentProofUploading}>close</button>
+    </div>
+{/if}
 
 <style>
     .no-scrollbar::-webkit-scrollbar {
