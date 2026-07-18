@@ -2,6 +2,7 @@
 import { PUBLIC_R2_PUBLIC_URL, PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY } from '$env/static/public';
 import { env } from '$env/dynamic/private';
 import { createClient } from '@supabase/supabase-js';
+import { getRequestUserId } from '$lib/server/requestAuth';
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 const ALLOWED_MIME_TYPES = [
@@ -11,16 +12,20 @@ const ALLOWED_MIME_TYPES = [
     'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp4', 'audio/aac', 'audio/webm',
 ];
 
+function validUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
+}
+
 /** Verify the requesting user is an admin/owner by checking the users table. */
-async function getAuthUser(request, cfServiceKey) {
+async function getAuthUser(event, cfServiceKey) {
+    const { request, platform } = event;
     const authHeader = request.headers.get('Authorization');
-    const userId = request.headers.get('X-User-Id');
+    const userId = await getRequestUserId(event) || request.headers.get('X-User-Id');
     if (!userId) return null;
-    // Basic UUID format check to prevent injection
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) return null;
+    if (!validUuid(userId)) return null;
 
     // Use service role key (bypasses RLS) — try CF platform.env first, then $env/dynamic/private
-    const serviceKey = cfServiceKey || env.SUPABASE_SERVICE_ROLE_KEY;
+    const serviceKey = cfServiceKey || platform?.env?.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
     if (serviceKey) {
         // Service role: trust UUID, verify against users table
         const supabase = createClient(PUBLIC_SUPABASE_URL, serviceKey, {
@@ -77,13 +82,14 @@ async function getAuthUserAnon(userId) {
     return user || null;
 }
 
-export async function GET({ url, platform, request }) {
+export async function GET(event) {
+    const { url, platform, request } = event;
     if (!platform?.env?.BUCKET) {
         return json({ error: 'R2 Bucket not configured' }, { status: 500 });
     }
 
     const userId = request.headers.get('X-User-Id');
-    const user = await getAuthUser(request, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
+    const user = await getAuthUser(event, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
         || (userId ? await getAuthUserAnon(userId) : null);
     if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -106,7 +112,8 @@ export async function GET({ url, platform, request }) {
     });
 }
 
-export async function POST({ request, platform }) {
+export async function POST(event) {
+    const { request, platform } = event;
     if (!platform?.env?.BUCKET) {
         return json({ error: 'R2 Bucket not configured' }, { status: 500 });
     }
@@ -135,10 +142,10 @@ export async function POST({ request, platform }) {
 
     const userId = request.headers.get('X-User-Id');
     if (safeFolder === 'payment_proofs') {
-        const anyUser = await getAnyAuthUser(request, userId, platform?.env?.SUPABASE_SERVICE_ROLE_KEY);
+        const anyUser = await getAnyAuthUser(event, userId, platform?.env?.SUPABASE_SERVICE_ROLE_KEY);
         if (!anyUser) return json({ error: 'Unauthorized' }, { status: 401 });
     } else {
-        const user = await getAuthUser(request, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
+        const user = await getAuthUser(event, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
             || (userId ? await getAuthUserAnon(userId) : null);
         if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -157,13 +164,17 @@ export async function POST({ request, platform }) {
 }
 
 /** Verify ANY authenticated user (not just admin/owner) — used for self-owned files like avatars. */
-async function getAnyAuthUser(request, userId, cfServiceKey) {
-    if (!userId) return null;
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) return null;
+async function getAnyAuthUser(event, userId, cfServiceKey) {
+    const { request, platform } = event;
+    const requestUserId = await getRequestUserId(event);
+    userId = requestUserId || userId;
+    if (!userId || !validUuid(userId)) return null;
+    if (requestUserId) return { id: requestUserId };
+
     const authHeader = request.headers.get('Authorization');
     if (!authHeader?.startsWith('Bearer ')) return null;
     const token = authHeader.slice(7);
-    const serviceKey = cfServiceKey || env.SUPABASE_SERVICE_ROLE_KEY;
+    const serviceKey = cfServiceKey || platform?.env?.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
     const supabase = createClient(PUBLIC_SUPABASE_URL, serviceKey || PUBLIC_SUPABASE_ANON_KEY, {
         auth: { persistSession: false, autoRefreshToken: false }
     });
@@ -172,7 +183,8 @@ async function getAnyAuthUser(request, userId, cfServiceKey) {
     return authUser;
 }
 
-export async function DELETE({ request, platform }) {
+export async function DELETE(event) {
+    const { request, platform } = event;
     if (!platform?.env?.BUCKET) {
         return json({ error: 'R2 Bucket not configured' }, { status: 500 });
     }
@@ -207,11 +219,11 @@ export async function DELETE({ request, platform }) {
 
     // Avatar files: allow any authenticated user to delete (needed for profile photo cleanup)
     if (key.startsWith('avatars/')) {
-        const anyUser = await getAnyAuthUser(request, userId, platform?.env?.SUPABASE_SERVICE_ROLE_KEY);
+        const anyUser = await getAnyAuthUser(event, userId, platform?.env?.SUPABASE_SERVICE_ROLE_KEY);
         if (!anyUser) return json({ error: 'Unauthorized' }, { status: 401 });
     } else {
         // All other files: require admin/owner
-        const user = await getAuthUser(request, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
+        const user = await getAuthUser(event, platform?.env?.SUPABASE_SERVICE_ROLE_KEY)
             || (userId ? await getAuthUserAnon(userId) : null);
         if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
     }
