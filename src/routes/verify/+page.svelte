@@ -3,7 +3,6 @@
     import { fade, scale, fly } from 'svelte/transition';
     import { page } from '$app/stores';
     import { SendIcon } from 'lucide-svelte';
-    import { supabase } from '$lib/supabaseClient';
 
 
     let loading = true;
@@ -26,47 +25,23 @@
         }
 
         try {
-            // 1. ទាញយកព័ត៌មានសិស្ស
-            const { data: userData, error: userError } = await supabase
-                .from('users')
-                .select('full_name, name_latin, avatar_url')
-                .eq('id', u)
-                .single();
+            const response = await fetch(`/api/verify-certificate?u=${encodeURIComponent(u)}&c=${encodeURIComponent(c)}`);
+            const result = await response.json().catch(() => ({}));
 
-            if (userError || !userData) throw new Error('រកមិនឃើញសិស្ស');
-            student = userData;
-
-            // 2. ទាញយកព័ត៌មានវគ្គសិក្សា
-            const { data: courseData, error: courseError } = await supabase
-                .from('courses')
-                .select('title, thumbnail_url')
-                .eq('id', c)
-                .single();
-
-            if (courseError || !courseData) throw new Error('រកមិនឃើញវគ្គសិក្សា');
-            course = courseData;
-
-            // 3. ផ្ទៀងផ្ទាត់ការបញ្ចប់វគ្គសិក្សា (ពិនិត្យមើលថាតើបានប្រឡងជាប់ឬនៅ)
-            const { data: result, error: resultError } = await supabase
-                .from('student_quiz_results')
-                .select('created_at, passed, score')
-                .eq('user_id', u)
-                .eq('course_id', c)
-                .eq('passed', true)
-                .order('created_at', { ascending: false })
-                .limit(1)
-                .single();
-
-            if (resultError || !result) {
+            if (response.status === 404 || !result.valid) {
                 valid = false;
-                message = 'សិស្សនេះមិនទាន់បានបញ្ចប់វគ្គសិក្សានេះទេ ឬមិនទាន់ប្រឡងជាប់។';
-            } else {
-                valid = true;
-                completionDate = new Date(result.created_at).toLocaleDateString('km-KH');
-                score = result.score;
-                message = 'វិញ្ញាបនបត្រត្រឹមត្រូវ (Valid)';
+                message = response.status === 404
+                    ? 'សិស្សនេះមិនទាន់បានបញ្ចប់វគ្គសិក្សានេះទេ ឬមិនទាន់ប្រឡងជាប់។'
+                    : (result.error || 'មានបញ្ហាក្នុងការផ្ទៀងផ្ទាត់');
+                return;
             }
 
+            student = result.student;
+            course = result.course;
+            valid = true;
+            completionDate = new Date(result.completionDate).toLocaleDateString('km-KH');
+            score = result.score;
+            message = 'វិញ្ញាបនបត្រត្រឹមត្រូវ (Valid)';
         } catch (e) {
             valid = false;
             message = e.message || 'មានបញ្ហាក្នុងការផ្ទៀងផ្ទាត់';
