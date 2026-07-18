@@ -432,31 +432,17 @@
         loading = true;
         try {
             const normalizedPin = normalizeKhmerNumerals(pin).trim();
-            
-            const email = `${currentUser.phone_number}@ccn.local`;
-            const password = `${normalizedPin}-ccn`;
 
-            // សាកល្បង Login តាមរយៈ Supabase Auth (Secure JWT)
-            const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-                email,
-                password
+            const response = await fetch('/api/auth/legacy-session', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    userId: currentUser.id,
+                    pin: normalizedPin
+                })
             });
-
-            let isValid = !authError;
-
-            // បើ Login តាម Auth បរាជ័យ (អាចមកពីគណនីចាស់មិនទាន់មានក្នុង auth.users) យើង Fallback ទៅប្រើ RPC
-            if (authError) {
-                const response = await fetch('/api/auth/legacy-session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'same-origin',
-                    body: JSON.stringify({
-                        userId: currentUser.id,
-                        pin: normalizedPin
-                    })
-                });
-                isValid = response.ok;
-            }
+            const isValid = response.ok;
 
             if (isValid) {
                 if (rememberMe) localStorage.setItem('savedPhone', currentUser.phone_number);
