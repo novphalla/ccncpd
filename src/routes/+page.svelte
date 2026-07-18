@@ -786,40 +786,42 @@
 
         // Load Passed Courses History (ទាញយកប្រវត្តិប្រឡងជាប់)
         if (currentUser) {
-            // ប្រើ Promise.all ដើម្បីទាញយកទិន្នន័យ ៣ ផ្នែកនេះព្រមគ្នា ជំនួសឱ្យការរង់ចាំម្តងមួយៗ
-            const attemptsPromise = supabase.from('student_quiz_results') // Fetch recent attempts for cooldown logic
-                .select('course_id, passed, created_at, type')
-                .eq('user_id', currentUser.id)
-                .order('created_at', { ascending: false })
-                .limit(50);
+            const attemptsPromise = fetch('/api/my-quiz-results', {
+                headers: { 'X-User-Id': currentUser.id }
+            }).then(async (res) => {
+                const payload = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(payload?.error || 'មិនអាចទាញយកប្រវត្តិប្រឡងបានទេ');
+                return payload.attempts || [];
+            });
             
             const regsPromise = supabase.from('meeting_registrations')
                 .select('meeting_id')
                 .eq('user_id', currentUser.id)
                 .limit(100);
 
-            const [attemptsRes, regsRes] = await Promise.all([attemptsPromise, regsPromise]);
+            const [attemptsRes, regsRes] = await Promise.allSettled([attemptsPromise, regsPromise]);
 
             // 1. Process Quiz History
-            if (attemptsRes.error) console.error("Error loading history:", attemptsRes.error);
-            if (attemptsRes.data) {
-                userQuizAttempts = attemptsRes.data;
+            if (attemptsRes.status === 'rejected') console.error('Error loading history:', attemptsRes.reason);
+            if (attemptsRes.status === 'fulfilled') {
+                const attempts = attemptsRes.value;
+                userQuizAttempts = attempts;
                 // រាប់តែ Post-test ប៉ុណ្ណោះចូលក្នុង passedCourses (ដើម្បីចេញលិខិតបញ្ជាក់ការសិក្សា)
-                const dbPassed = attemptsRes.data.filter(a => a.passed && a.type !== 'pre').map(a => String(a.course_id));
+                const dbPassed = attempts.filter(a => a.passed && a.type !== 'pre').map(a => String(a.course_id));
                 passedCourses = [...new Set([...passedCourses, ...dbPassed])];
                 
-                const dbPreDone = attemptsRes.data.filter(a => a.type === 'pre').map(a => String(a.course_id));
+                const dbPreDone = attempts.filter(a => a.type === 'pre').map(a => String(a.course_id));
                 preTestDoneCourses = [...new Set(dbPreDone)];
                 
-                const dbPostAttempted = attemptsRes.data.filter(a => a.type !== 'pre').map(a => String(a.course_id));
+                const dbPostAttempted = attempts.filter(a => a.type !== 'pre').map(a => String(a.course_id));
                 postTestAttemptedCourses = [...new Set(dbPostAttempted)];
                 
                 // courseCooldowns is recalculated reactively whenever courses or userQuizAttempts change
             }
 
             // Process Meeting Registrations
-            if (regsRes.data) {
-                registeredMeetingIds = regsRes.data.map(r => r.meeting_id);
+            if (regsRes.status === 'fulfilled' && regsRes.value.data) {
+                registeredMeetingIds = regsRes.value.data.map(r => r.meeting_id);
             }
         }
     }
@@ -878,12 +880,6 @@
     }
 
     // --- QUIZ LOGIC ---
-    const STATIC_QUIZ = [
-        { question: "តើវិធានការសំខាន់បំផុតដើម្បីការពារការឆ្លងរោគក្នុងមន្ទីរពេទ្យគឺអ្វី?", options: ["ពាក់ម៉ាស់ជានិច្ច", "លាងដៃឱ្យបានត្រឹមត្រូវ", "ប្រើថ្នាំផ្សះ", "បាញ់អាល់កុល"], answer: 1 },
-        { question: "តើ PPE មកពីពាក្យពេញថាអ្វី?", options: ["Personal Protective Equipment", "Private Patient Entry", "Public Place Environment"], answer: 0 },
-        { question: "សញ្ញានៃការឆ្លងរោគ?", options: ["ឃ្លានបាយ", "ក្តៅខ្លួន", "សប្បាយចិត្ត"], answer: 1 }
-    ];
-
     async function openLesson(course) {
         // Reset state
         activeCourseForPlayer = course;
@@ -922,7 +918,24 @@
         }
 
         // Get cooldown from course settings (default 60 minutes)
-        const course = courses.find(c => c.id === courseId);
+        const course = courses.find(c => String(c.id) === String(courseId));
+        if (!course) {
+            return alert('រកមិនឃើញវគ្គសិក្សាសម្រាប់តេស្តនេះទេ។ សូមផ្ទុកទំព័រឡើងវិញ។');
+        }
+
+        // Enforce the opening time here so buttons, shared links and retries
+        // cannot enter the post-test through different paths.
+        if (type === 'post' && course.post_test_fixed_date) {
+            const opensAt = new Date(course.post_test_fixed_date);
+            if (!Number.isNaN(opensAt.getTime()) && opensAt.getTime() > Date.now()) {
+                const openingLabel = opensAt.toLocaleString('km-KH', {
+                    dateStyle: 'full',
+                    timeStyle: 'short',
+                    timeZone: 'Asia/Phnom_Penh'
+                });
+                return alert(`Post-test មិនទាន់បើកទេ។ អាចចូលធ្វើបាននៅ ${openingLabel}។`);
+            }
+        }
         
         // ពិនិត្យមើលថាតើវគ្គសិក្សាផុតកំណត់ហើយឬនៅ?
         if (course.cert_end_date && new Date(course.cert_end_date) < new Date()) {
@@ -959,12 +972,17 @@
         
         // Try fetch from DB, else fallback
         // កែប្រែ៖ ទាញយកសំណួរទាំងអស់ដោយមិនបែងចែក type (Pre/Post ប្រើសំណួរដូចគ្នា)
-        const { data } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId).order('sort_order', { ascending: true }).order('id', { ascending: true });
+        const { data, error } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId).order('sort_order', { ascending: true }).order('id', { ascending: true });
+
+        if (error) {
+            console.error('Error loading quiz questions:', error);
+            return alert('មិនអាចទាញយកសំណួរបានទេ។ សូមព្យាយាមម្តងទៀត។');
+        }
         
         if (data && data.length > 0) {
             let questions = data.map(q => ({
                 ...q, 
-                answer: q.correct_answer, // Ensure compatibility with STATIC_QUIZ format
+                answer: q.correct_answer,
                 answers: Array.isArray(q.correct_answer) ? q.correct_answer : [q.correct_answer]
             }));
             // Shuffle Questions (Fisher-Yates Shuffle)
@@ -974,7 +992,7 @@
             }
             quizData[courseId] = questions;
         } else {
-            quizData[courseId] = STATIC_QUIZ; // Fallback
+            return alert('វគ្គសិក្សានេះមិនទាន់មានសំណួរតេស្តនៅឡើយទេ។');
         }
         
         quizKey++;
@@ -982,21 +1000,34 @@
         pushState('#quiz', { screen: 'quiz' });
     }
 
-    async function updateUserXP(amount) {
-        if (currentUser) {
-            // SECURITY IMPROVEMENT: Use RPC to prevent client-side manipulation
-            // SQL Function needed: 
-            // create or replace function increment_xp(amount int) returns void as $$
-            //   update users set xp = coalesce(xp, 0) + amount where id = auth.uid();
-            // $$ language sql security definer;
-            
-            const { error } = await supabase.rpc('increment_xp', { amount });
-            
-            if (error) {
-                console.error("បរាជ័យក្នុងការបូកពិន្ទុ XP:", error.message);
-            } else {
-                currentUser.xp = (currentUser.xp || 0) + amount;
+    function handleQuizSaved(event) {
+        const { attempt, newXp, newCpdTotal } = event.detail || {};
+        if (!attempt?.course_id) return;
+
+        userQuizAttempts = [
+            attempt,
+            ...userQuizAttempts.filter(item => String(item.id) !== String(attempt.id))
+        ];
+
+        const courseId = String(attempt.course_id);
+        if (attempt.type === 'pre') {
+            preTestDoneCourses = [...new Set([...preTestDoneCourses, courseId])];
+        } else {
+            postTestAttemptedCourses = [...new Set([...postTestAttemptedCourses, courseId])];
+            if (attempt.passed) {
+                passedCourses = [...new Set([...passedCourses, courseId])];
             }
+        }
+
+        if (currentUser) {
+            const updates = {};
+            if (newXp !== null && newXp !== undefined && Number.isFinite(Number(newXp))) {
+                updates.xp = Number(newXp);
+            }
+            if (newCpdTotal !== null && newCpdTotal !== undefined && Number.isFinite(Number(newCpdTotal))) {
+                updates.cpd_total = Number(newCpdTotal);
+            }
+            currentUser = { ...currentUser, ...updates };
         }
     }
 
@@ -1006,11 +1037,17 @@
 
         // 1. Ensure questions are loaded
         if (!quizData[courseId]) {
-             const { data } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId);
+             const { data, error } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId);
+             if (error) {
+                loading = false;
+                console.error('Error loading quiz review questions:', error);
+                return alert('មិនអាចទាញយកសំណួរបានទេ។ សូមព្យាយាមម្តងទៀត។');
+             }
              if (data && data.length > 0) {
                 quizData[courseId] = data.map(q => ({...q, answer: q.correct_answer}));
              } else {
-                quizData[courseId] = STATIC_QUIZ;
+                loading = false;
+                return alert('វគ្គសិក្សានេះមិនទាន់មានសំណួរតេស្តនៅឡើយទេ។');
              }
         }
 
@@ -1110,10 +1147,26 @@
         try {
             const canvas = document.createElement('canvas');
             
-            const { data: attempt } = await supabase.from('student_quiz_results').select('id, created_at').eq('user_id', currentUser.id).eq('course_id', course.id).eq('passed', true).order('created_at', { ascending: false }).limit(1).single();
+            let attempt = userQuizAttempts
+                .filter(a => String(a.course_id) === String(course.id) && a.passed && a.type !== 'pre')
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
 
-            const certId = attempt ? `CCN-${String(attempt.id).padStart(3, '0')}` : `ID: ${Date.now().toString().slice(-9)}`;
-            const dateVal = attempt ? new Date(attempt.created_at) : new Date();
+            if (!attempt) {
+                const res = await fetch('/api/my-quiz-results', {
+                    headers: { 'X-User-Id': currentUser.id }
+                });
+                const payload = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    const attempts = payload.attempts || [];
+                    userQuizAttempts = attempts;
+                    attempt = attempts
+                        .filter(a => String(a.course_id) === String(course.id) && a.passed && a.type !== 'pre')
+                        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+                }
+            }
+
+            const certId = attempt?.id ? `CCN-${String(attempt.id).padStart(3, '0')}` : `ID: ${Date.now().toString().slice(-9)}`;
+            const dateVal = attempt?.created_at ? new Date(attempt.created_at) : new Date();
             const dateStr = dateVal.toLocaleDateString('km-KH');
             const qrData = `${window.location.origin}/verify?u=${currentUser.id}&c=${course.id}`;
             const logoUrl = loginLogoUrl || '/ccn-logo.png';
@@ -1680,34 +1733,14 @@
                 })()}
                 {supabase} 
                 {currentUser}
-                on:addXP={(e) => updateUserXP(e.detail)}
+                on:saved={handleQuizSaved}
                 on:retry={() => startQuiz(activeCourseId, true)}
-                on:complete={() => { 
-                    // ធ្វើបច្ចុប្បន្នភាពភ្លាមៗ (Optimistic Update) ដើម្បីកុំឱ្យរង់ចាំ loadHomeData
-                    if (activeQuizType !== 'pre' && activeCourseId && !passedCourses.includes(String(activeCourseId))) {
-                        passedCourses = [...passedCourses, String(activeCourseId)];
-                    }
-                    if (activeQuizType === 'pre' && !preTestDoneCourses.includes(String(activeCourseId))) {
-                        preTestDoneCourses = [...preTestDoneCourses, String(activeCourseId)];
-                    }
-                    if (activeQuizType !== 'pre' && !postTestAttemptedCourses.includes(String(activeCourseId))) {
-                        postTestAttemptedCourses = [...postTestAttemptedCourses, String(activeCourseId)];
-                    }
-                    loadHomeData().then(async () => {
-                        // ទាញយកពិន្ទុថ្មីពី Database (ព្រោះ Trigger បានបូករួចហើយ)
-                        const { data } = await supabase.from('users').select('cpd_total').eq('id', currentUser.id).single();
-                        if (data) currentUser.cpd_total = data.cpd_total;
-                    });
-                }}
                 on:review={(e) => {
                     userAnswers = e.detail.answers;
                     currentScreen = 'review';
                     window.history.pushState({ screen: 'review' }, '', '#review');
                 }}
-                on:close={async () => { 
-                    // រង់ចាំ 1 វិនាទី ដើម្បីឱ្យទិន្នន័យចូល Database សព្វគ្រប់
-                    await new Promise(r => setTimeout(r, 1000));
-                    await loadHomeData(); 
+                on:close={() => {
                     currentScreen = 'home';
                 }}
             />

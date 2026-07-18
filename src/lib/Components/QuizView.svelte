@@ -21,6 +21,9 @@
     let answers = []; 
     let passed = false;
     let isSubmitted = false;
+    let isFinishing = false;
+    let attemptKey = null;
+    let xpAwarded = 0;
     
     // Cooldown Timer State
     let remainingTimeDisplay = '';
@@ -75,11 +78,22 @@
     }
 
     function selectOption(index) {
-        if (isSubmitted) return;
+        if (isSubmitted || isFinishing) return;
         selectedOption = index;
     }
 
+    function createAttemptKey() {
+        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, character => {
+            const random = Math.floor(Math.random() * 16);
+            const value = character === 'x' ? random : (random & 0x3) | 0x8;
+            return value.toString(16);
+        });
+    }
+
     function handleNext() {
+        if (isFinishing) return;
+
         if (!isSubmitted) {
             isCorrect = currentCorrectAnswers.includes(selectedOption);
             answers[currentQuestionIndex] = selectedOption;
@@ -147,44 +161,45 @@
     });
 
     async function finishQuiz() {
+        if (isFinishing || !currentUser || !questions.length) return;
+
+        isFinishing = true;
+        attemptKey ||= createAttemptKey();
+
+        const { data, error } = await supabase.rpc('submit_quiz_and_update_xp', {
+            p_user_id: currentUser.id,
+            p_course_id: courseId,
+            p_answers: answers,
+            p_type: quizType,
+            p_question_ids: questions.map(q => q.id),
+            p_attempt_key: attemptKey
+        });
+
+        if (error) {
+            isFinishing = false;
+            console.error("Error saving quiz result:", error);
+            alert("បរាជ័យក្នុងការរក្សាទុកលទ្ធផលតេស្ត: " + error.message);
+            return;
+        }
+
+        const savedResult = Array.isArray(data) ? data[0] : data;
+        score = Number(savedResult?.correct_count ?? score);
+        passed = savedResult?.passed === true;
+        xpAwarded = Number(savedResult?.xp_awarded || 0);
         showResult = true;
-        const percentage = Math.round((score / questions.length) * 100);
-        
-        // Pre-test: ជាប់ជានិច្ច (Completion only)
-        if (quizType === 'pre') {
-            passed = true;
-        } else {
-            passed = percentage >= passingScore; // ពិនិត្យថាតើពិន្ទុគ្រប់គ្រាន់ឬនៅ?
-        }
+        isFinishing = false;
 
-        if (currentUser) {
-            // Random delay between 0 and 2000ms to prevent thundering herd when many users submit at the exact same time
-            const jitterMs = Math.floor(Math.random() * 2000);
-            await new Promise(resolve => setTimeout(resolve, jitterMs));
-
-            const totalXpToAward = (score * 10) + (passed ? 50 : 0);
-            const { error } = await supabase.rpc('submit_quiz_and_update_xp', {
-                p_user_id: currentUser.id,
-                p_course_id: courseId,
-                p_score: percentage,
-                p_passed: passed,
-                p_answers: answers,
-                p_total_questions: questions.length,
-                p_correct_count: score,
-                p_percentage: percentage,
-                p_type: quizType,
-                p_question_ids: questions.map(q => q.id),
-                p_xp_amount: totalXpToAward
-            });
-            
-            if (error) {
-                console.error("Error saving quiz result:", error);
-                alert("បរាជ័យក្នុងការរក្សាទុកលទ្ធផលតេស្ត: " + error.message);
-            } else {
-                // Update local XP without hitting the DB again
-                currentUser.xp = (currentUser.xp || 0) + totalXpToAward;
-            }
-        }
+        dispatch('saved', {
+            attempt: {
+                id: savedResult?.result_id,
+                course_id: courseId,
+                passed,
+                created_at: savedResult?.created_at || new Date().toISOString(),
+                type: quizType
+            },
+            newXp: savedResult?.new_xp,
+            newCpdTotal: savedResult?.new_cpd_total
+        });
 
         if (passed) {
             dispatch('complete');
@@ -201,7 +216,7 @@
         <!-- Header -->
         <div class="bg-white p-4 shadow-sm flex justify-between items-center z-20">
             <div class="flex items-center gap-2">
-                <button on:click={() => dispatch('close')} class="btn btn-sm btn-circle btn-ghost">✕</button>
+                <button on:click={() => dispatch('close')} class="btn btn-sm btn-circle btn-ghost" disabled={isFinishing}>✕</button>
                 <span class="font-bold text-gray-800">សំណួរទី {currentQuestionIndex + 1}/{questions.length}</span>
             </div>
         </div>
@@ -238,7 +253,10 @@
 
                     {#if selectedOption !== null}
                         <div class="mt-6 flex justify-end" in:fade>
-                            <button on:click={handleNext} class="btn btn-primary btn-lg rounded-full shadow-lg shadow-primary/40 px-8">
+                            <button on:click={handleNext} disabled={isFinishing} class="btn btn-primary btn-lg rounded-full shadow-lg shadow-primary/40 px-8">
+                                {#if isFinishing}
+                                    <span class="loading loading-spinner loading-sm"></span>
+                                {/if}
                                 {#if !isSubmitted}
                                     {quizType === 'pre' ? 'បញ្ជូនចម្លើយ' : 'ពិនិត្យចម្លើយ'}
                                 {:else}
@@ -300,7 +318,7 @@
                         </div>
                         <div class="stat place-items-center">
                             <div class="stat-title">XP ទទួលបាន</div>
-                            <div class="stat-value text-amber-500 text-3xl">+{passed ? score * 10 + 50 : score * 10}</div>
+                            <div class="stat-value text-amber-500 text-3xl">+{xpAwarded}</div>
                             <div class="stat-desc">ពិន្ទុបទពិសោធន៍</div>
                         </div>
                     </div>
