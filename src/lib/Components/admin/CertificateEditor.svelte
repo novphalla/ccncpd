@@ -6,11 +6,11 @@
         DownloadIcon, EyeIcon, UploadIcon 
     } from 'lucide-svelte';
     import { PUBLIC_R2_PUBLIC_URL } from '$env/static/public';
-    import { normalizeAssetUrl } from '$lib/utils.js';
+    import { normalizeAssetProxyUrl } from '$lib/utils.js';
 
     export let editingCourse;
 
-    $: certTemplateUrl = normalizeAssetUrl(editingCourse?.cert_template_url, PUBLIC_R2_PUBLIC_URL);
+    $: certTemplateUrl = normalizeAssetProxyUrl(editingCourse?.cert_template_url, PUBLIC_R2_PUBLIC_URL);
 
     let certificateElement;
     let previewImageElement;
@@ -353,6 +353,7 @@
     }
 
     function injectCustomFont(fontName, fontUrl) {
+        const proxiedFontUrl = normalizeAssetProxyUrl(fontUrl, PUBLIC_R2_PUBLIC_URL);
         const styleId = `font-${fontName}`;
         let style = document.getElementById(styleId);
         if (!style) {
@@ -363,7 +364,7 @@
         style.textContent = `
             @font-face {
                 font-family: 'CustomFont-${fontName}';
-                src: url('${fontUrl}');
+                src: url('${proxiedFontUrl}');
             }
         `;
     }

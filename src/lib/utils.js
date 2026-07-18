@@ -20,6 +20,24 @@ export function normalizeAssetUrl(url, r2BaseUrl) {
     return r2BaseUrl.replace(/\/$/, '') + '/' + url;
 }
 
+
+/**
+ * Converts R2 public URLs or bare R2 keys to the same-origin /materials proxy.
+ * This avoids browser CORS failures when images are used in canvas/export flows.
+ */
+export function normalizeAssetProxyUrl(url, r2BaseUrl) {
+    if (!url) return url;
+    if (url.startsWith('/materials/')) return url;
+    if (url.startsWith('/')) return url;
+
+    const base = r2BaseUrl?.replace(/\/$/, '');
+    if (base && url.startsWith(`${base}/`)) {
+        return `/materials/${url.slice(base.length + 1)}`;
+    }
+
+    if (url.startsWith('http') || url.startsWith('data:') || url.startsWith('blob:')) return url;
+    return `/materials/${url.replace(/^\/+/, '')}`;
+}
 export function normalizeKhmerNumerals(str) {
     if (!str) return '';
     return str.replace(/[០-៩]/g, d => '0123456789'['០១២៣៤៥៦៧៨៩'.indexOf(d)]);

@@ -1,5 +1,7 @@
 <script>
     import { createEventDispatcher, onMount, tick } from 'svelte';
+    import { PUBLIC_R2_PUBLIC_URL } from '$env/static/public';
+    import { normalizeAssetProxyUrl } from '$lib/utils.js';
     export let course;
     export let currentUser;
     export let t;
@@ -25,7 +27,8 @@
         if (config.customFontUrl) {
             try {
                 const fontName = `CourseFont_${course.id}`;
-                const fontFace = new FontFace(fontName, `url(${config.customFontUrl})`);
+                const customFontUrl = normalizeAssetProxyUrl(config.customFontUrl, PUBLIC_R2_PUBLIC_URL);
+                const fontFace = new FontFace(fontName, `url(${customFontUrl})`);
                 await fontFace.load();
                 document.fonts.add(fontFace);
             } catch(e) { console.error("Font load error", e); }
@@ -35,7 +38,9 @@
 
         const img = new Image();
         img.crossOrigin = "anonymous";
-        img.src = course.cert_template_url || "https://img.freepik.com/free-vector/elegant-certificate-template_23-2147940545.jpg";
+        img.src = course.cert_template_url
+            ? normalizeAssetProxyUrl(course.cert_template_url, PUBLIC_R2_PUBLIC_URL)
+            : "https://img.freepik.com/free-vector/elegant-certificate-template_23-2147940545.jpg";
         
         img.onload = async () => {
             ctx.fillStyle = "#ffffff";

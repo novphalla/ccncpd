@@ -1,10 +1,12 @@
 import QRCode from 'qrcode';
+import { PUBLIC_R2_PUBLIC_URL } from '$env/static/public';
+import { normalizeAssetProxyUrl } from '$lib/utils.js';
 
 export async function drawCertificate(canvas, course, user, certId, dateStr, qrData, logoUrl) {
     const ctx = canvas.getContext('2d');
     const img = new Image();
     img.crossOrigin = "Anonymous";
-    img.src = course.cert_template_url;
+    img.src = normalizeAssetProxyUrl(course.cert_template_url, PUBLIC_R2_PUBLIC_URL);
 
     await new Promise((resolve, reject) => {
         img.onload = resolve;
@@ -22,7 +24,8 @@ export async function drawCertificate(canvas, course, user, certId, dateStr, qrD
         if (fontName === 'Custom' && fontUrl) {
             try {
                 const fontFaceName = 'CustomFont_' + Math.random().toString(36).substr(2, 9);
-                const fontFace = new FontFace(fontFaceName, `url(${fontUrl})`);
+                const proxiedFontUrl = normalizeAssetProxyUrl(fontUrl, PUBLIC_R2_PUBLIC_URL);
+                const fontFace = new FontFace(fontFaceName, `url(${proxiedFontUrl})`);
                 await fontFace.load();
                 document.fonts.add(fontFace);
                 return fontFaceName;
@@ -83,7 +86,7 @@ export async function drawCertificate(canvas, course, user, certId, dateStr, qrD
         if (logoUrl) {
             const logoImg = new Image();
             logoImg.crossOrigin = "Anonymous";
-            logoImg.src = logoUrl;
+            logoImg.src = normalizeAssetProxyUrl(logoUrl, PUBLIC_R2_PUBLIC_URL);
             
             await new Promise(resolve => {
                 logoImg.onload = () => {
