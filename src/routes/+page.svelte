@@ -135,6 +135,13 @@
         return safeUser;
     }
 
+    async function apiFetch(url, options = {}) {
+        const { data: { session } } = await supabase.auth.getSession();
+        const headers = new Headers(options.headers || {});
+        if (session?.access_token) headers.set('Authorization', `Bearer ${session.access_token}`);
+        return fetch(url, { ...options, headers, credentials: 'same-origin' });
+    }
+
     function base64ToUint8Array(base64) {
         const padding = '='.repeat((4 - (base64.length % 4)) % 4);
         const safeBase64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -152,9 +159,22 @@
         
         let targetUserId = session?.user?.id;
 
-        // Fallback សម្រាប់អ្នកប្រើប្រាស់ចាស់ ដែលមិនទាន់មាន Session Auth
+        // Legacy accounts use a signed, HttpOnly server session.
         if (!targetUserId) {
-            targetUserId = localStorage.getItem('sessionUserId');
+            const storedUserId = localStorage.getItem('sessionUserId');
+            if (storedUserId) {
+                const legacyResponse = await fetch('/api/auth/legacy-session', {
+                    credentials: 'same-origin'
+                }).catch(() => null);
+                const legacyPayload = legacyResponse
+                    ? await legacyResponse.json().catch(() => ({}))
+                    : {};
+                if (legacyResponse?.ok && legacyPayload.userId === storedUserId) {
+                    targetUserId = storedUserId;
+                } else {
+                    localStorage.removeItem('sessionUserId');
+                }
+            }
         }
 
         if (targetUserId) {
@@ -239,14 +259,14 @@
             window.removeEventListener('offline', handleOffline);
             window.removeEventListener('popstate', handlePopState);
         }
+        for (const timeout of attendanceTimeouts) clearTimeout(timeout);
+        if (successToastTimeout) clearTimeout(successToastTimeout);
     });
 
     function handleVisibilityChange() {
         if (!document.hidden) {
-            // Refresh data when app becomes visible again
-            loadSystemSettings(); // ពិនិត្យមើលការកំណត់ Update Mode ពេលបើកកម្មវិធីមកវិញ
+            loadSystemSettings();
             loadHomeData();
-            queryClient.invalidateQueries({ queryKey: ['courses'] });
         }
     }
 
@@ -426,13 +446,16 @@
 
             // បើ Login តាម Auth បរាជ័យ (អាចមកពីគណនីចាស់មិនទាន់មានក្នុង auth.users) យើង Fallback ទៅប្រើ RPC
             if (authError) {
-                const hashedPin = await hashPin(normalizedPin);
-                const res = await supabase.rpc('verify_pin', {
-                    user_id: currentUser.id,
-                    pin_hash: hashedPin,
-                    pin_plain: normalizedPin
+                const response = await fetch('/api/auth/legacy-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        userId: currentUser.id,
+                        pin: normalizedPin
+                    })
                 });
-                isValid = res.data;
+                isValid = response.ok;
             }
 
             if (isValid) {
@@ -647,6 +670,10 @@
         showProfileModal = false;
 
         await supabase.auth.signOut();
+        await fetch('/api/auth/legacy-session', {
+            method: 'DELETE',
+            credentials: 'same-origin'
+        }).catch(() => null);
         localStorage.removeItem('sessionUserId');
 
         currentUser = null;
@@ -697,7 +724,23 @@
     }
 
     // --- SYSTEM SETTINGS ---
-    async function loadSystemSettings() {
+    let settingsLoadPromise = null;
+    let settingsLoadedAt = 0;
+
+    async function loadSystemSettings({ force = false } = {}) {
+        if (!force && Date.now() - settingsLoadedAt < 5 * 60 * 1000) return;
+        if (settingsLoadPromise) return settingsLoadPromise;
+
+        settingsLoadPromise = performLoadSystemSettings();
+        try {
+            await settingsLoadPromise;
+            settingsLoadedAt = Date.now();
+        } finally {
+            settingsLoadPromise = null;
+        }
+    }
+
+    async function performLoadSystemSettings() {
         // Requires table 'app_settings' with columns: id (int8), login_bg_url (text), login_logo_url (text)
         const { data, error } = await supabase.from('app_settings').select('*').eq('id', 1).maybeSingle();
         if (error) {
@@ -725,58 +768,46 @@
     }
 
     // --- DATA LOADING ---
-    async function loadHomeData() {
+    let homeDataLoadPromise = null;
+    let homeDataLoadedAt = 0;
+    let homeDataUserId = null;
+
+    async function loadHomeData({ force = false } = {}) {
+        const userId = currentUser?.id || null;
+        if (!force && userId === homeDataUserId && Date.now() - homeDataLoadedAt < 2 * 60 * 1000) return;
+        if (homeDataLoadPromise) return homeDataLoadPromise;
+
+        homeDataLoadPromise = performLoadHomeData();
+        try {
+            await homeDataLoadPromise;
+            homeDataLoadedAt = Date.now();
+            homeDataUserId = userId;
+        } finally {
+            homeDataLoadPromise = null;
+        }
+    }
+
+    async function performLoadHomeData() {
         // Meetings
         // Filter out meetings older than 5 days for users (but keep in DB for admin)
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - 5);
 
-        // 1. Load Meetings
-        let data = [];
-        try {
-            let meetingsQuery = supabase.from('live_meetings')
-                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at, course_id').is('deleted_at', null).gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
-            if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
-                meetingsQuery = meetingsQuery.eq('is_published', true);
-            }
-            const meetingsRes = await meetingsQuery;
-            if (meetingsRes.error && meetingsRes.error.message?.includes('course_id')) {
-                let fallbackQuery = supabase.from('live_meetings')
-                    .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').is('deleted_at', null).gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
-                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
-                    fallbackQuery = fallbackQuery.eq('is_published', true);
-                }
-                ({ data } = await fallbackQuery);
-            } else {
-                data = meetingsRes.data || [];
-            }
-        } catch (e) {
-            console.warn("Error fetching meetings (likely missing deleted_at), falling back...", e);
-            let meetingsQuery = supabase.from('live_meetings')
-                .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at, course_id').gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
-            if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
-                meetingsQuery = meetingsQuery.eq('is_published', true);
-            }
-            const meetingsRes = await meetingsQuery;
-            if (meetingsRes.error && meetingsRes.error.message?.includes('course_id')) {
-                let fallbackQuery = supabase.from('live_meetings')
-                    .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at').gte('scheduled_at', cutoffDate.toISOString()).order('scheduled_at', { ascending: false }).limit(20);
-                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
-                    fallbackQuery = fallbackQuery.eq('is_published', true);
-                }
-                ({ data } = await fallbackQuery);
-            } else {
-                data = meetingsRes.data || [];
-            }
+        let meetingsQuery = supabase.from('live_meetings')
+            .select('id, title, scheduled_at, meeting_url, registration_form_id, is_published, join_available_at, course_id')
+            .is('deleted_at', null)
+            .gte('scheduled_at', cutoffDate.toISOString())
+            .order('scheduled_at', { ascending: false })
+            .limit(20);
+        if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
+            meetingsQuery = meetingsQuery.eq('is_published', true);
         }
-
-        // Lazy load LessonPlayer component
-        if (!LessonPlayerComponent) {
-            const module = await import('$lib/Components/admin/LessonPlayer.svelte');
-            LessonPlayerComponent = module.default;
+        const meetingsRes = await meetingsQuery;
+        if (meetingsRes.error) {
+            console.error('Error loading meetings:', meetingsRes.error);
+        } else {
+            meetings = meetingsRes.data || [];
         }
-
-        meetings = data || [];
 
         // Fetch Total Users for Admin
         if (currentUser?.role === 'admin' || currentUser?.role === 'owner') {
@@ -786,9 +817,7 @@
 
         // Load Passed Courses History (ទាញយកប្រវត្តិប្រឡងជាប់)
         if (currentUser) {
-            const attemptsPromise = fetch('/api/my-quiz-results', {
-                headers: { 'X-User-Id': currentUser.id }
-            }).then(async (res) => {
+            const attemptsPromise = apiFetch('/api/my-quiz-results').then(async (res) => {
                 const payload = await res.json().catch(() => ({}));
                 if (!res.ok) throw new Error(payload?.error || 'មិនអាចទាញយកប្រវត្តិប្រឡងបានទេ');
                 return payload.attempts || [];
@@ -807,7 +836,7 @@
                 const attempts = attemptsRes.value;
                 userQuizAttempts = attempts;
                 // រាប់តែ Post-test ប៉ុណ្ណោះចូលក្នុង passedCourses (ដើម្បីចេញលិខិតបញ្ជាក់ការសិក្សា)
-                const dbPassed = attempts.filter(a => a.passed && a.type !== 'pre').map(a => String(a.course_id));
+                const dbPassed = attempts.filter(a => a.latest_passed_id && a.type !== 'pre').map(a => String(a.course_id));
                 passedCourses = [...new Set([...passedCourses, ...dbPassed])];
                 
                 const dbPreDone = attempts.filter(a => a.type === 'pre').map(a => String(a.course_id));
@@ -822,6 +851,8 @@
             // Process Meeting Registrations
             if (regsRes.status === 'fulfilled' && regsRes.value.data) {
                 registeredMeetingIds = regsRes.value.data.map(r => r.meeting_id);
+            } else if (regsRes.status === 'rejected' || regsRes.value?.error) {
+                console.error('Error loading meeting registrations:', regsRes.reason || regsRes.value?.error);
             }
         }
     }
@@ -835,7 +866,7 @@
     async function refreshHome() {
         isRefreshingHome = true;
         try {
-            await loadHomeData();
+            await loadHomeData({ force: true });
             await queryClient.invalidateQueries({ queryKey: ['courses'] });
         } catch (e) { console.error(e); }
         finally { isRefreshingHome = false; homePullMoveY = 0; }
@@ -883,6 +914,11 @@
     async function openLesson(course) {
         // Reset state
         activeCourseForPlayer = course;
+
+        if (!LessonPlayerComponent) {
+            const module = await import('$lib/Components/admin/LessonPlayer.svelte');
+            LessonPlayerComponent = module.default;
+        }
         
         // Fetch lessons from DB
         const { data, error } = await supabase.from('lessons').select('*').eq('course_id', course.id).order('sort_order', {ascending: true});
@@ -912,8 +948,7 @@
     async function startQuiz(courseId, retake = false, type = 'post') {
         activeQuizType = type;
         
-        // បើជា Post-test ហើយជាប់ហើយ មិនបាច់ធ្វើទៀតទេ (លើកលែងតែចង់ Retake)
-        if (type === 'post' && passedCourses.includes(String(courseId)) && !retake) {
+        if (type === 'post' && passedCourses.includes(String(courseId))) {
             return alert("អ្នកបានប្រឡងជាប់វគ្គនេះរួចហើយ! (You have already passed this course!)");
         }
 
@@ -950,7 +985,9 @@
 
         // --- COOLDOWN CHECK (រង់ចាំ ១ ម៉ោង) ---
         // Use local data instead of fetching again
-        const attempts = userQuizAttempts.filter(a => String(a.course_id) === String(courseId));
+        const attempts = type === 'post'
+            ? userQuizAttempts.filter(a => String(a.course_id) === String(courseId) && a.type === 'post')
+            : [];
         const lastAttempt = attempts.length > 0 ? attempts[0] : null;
 
         if (lastAttempt && !lastAttempt.passed) {
@@ -970,29 +1007,25 @@
 
         activeCourseId = courseId;
         
-        // Try fetch from DB, else fallback
-        // កែប្រែ៖ ទាញយកសំណួរទាំងអស់ដោយមិនបែងចែក type (Pre/Post ប្រើសំណួរដូចគ្នា)
-        const { data, error } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId).order('sort_order', { ascending: true }).order('id', { ascending: true });
+        try {
+            const response = await apiFetch(`/api/quiz-questions?course_id=${encodeURIComponent(courseId)}`);
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || 'មិនអាចទាញយកសំណួរបានទេ');
 
-        if (error) {
-            console.error('Error loading quiz questions:', error);
-            return alert('មិនអាចទាញយកសំណួរបានទេ។ សូមព្យាយាមម្តងទៀត។');
-        }
-        
-        if (data && data.length > 0) {
-            let questions = data.map(q => ({
-                ...q, 
-                answer: q.correct_answer,
-                answers: Array.isArray(q.correct_answer) ? q.correct_answer : [q.correct_answer]
-            }));
+            let questions = payload.questions || [];
+            if (!questions.length) {
+                return alert('វគ្គសិក្សានេះមិនទាន់មានសំណួរតេស្តនៅឡើយទេ។');
+            }
+
             // Shuffle Questions (Fisher-Yates Shuffle)
             for (let i = questions.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [questions[i], questions[j]] = [questions[j], questions[i]];
             }
             quizData[courseId] = questions;
-        } else {
-            return alert('វគ្គសិក្សានេះមិនទាន់មានសំណួរតេស្តនៅឡើយទេ។');
+        } catch (error) {
+            console.error('Error loading quiz questions:', error);
+            return alert(error.message || 'មិនអាចទាញយកសំណួរបានទេ។ សូមព្យាយាមម្តងទៀត។');
         }
         
         quizKey++;
@@ -1004,9 +1037,20 @@
         const { attempt, newXp, newCpdTotal } = event.detail || {};
         if (!attempt?.course_id) return;
 
+        const previous = userQuizAttempts.find(item =>
+            String(item.course_id) === String(attempt.course_id) && item.type === attempt.type
+        );
+        const summary = {
+            ...attempt,
+            fail_count: attempt.passed ? 0 : Number(previous?.fail_count || 0) + 1,
+            latest_passed_id: attempt.passed ? attempt.id : previous?.latest_passed_id || null,
+            latest_passed_at: attempt.passed ? attempt.created_at : previous?.latest_passed_at || null
+        };
         userQuizAttempts = [
-            attempt,
-            ...userQuizAttempts.filter(item => String(item.id) !== String(attempt.id))
+            summary,
+            ...userQuizAttempts.filter(item => !(
+                String(item.course_id) === String(attempt.course_id) && item.type === attempt.type
+            ))
         ];
 
         const courseId = String(attempt.course_id);
@@ -1034,40 +1078,20 @@
     async function reviewQuiz(courseId) {
         loading = true;
         activeCourseId = courseId;
+        try {
+            const response = await apiFetch(`/api/quiz-questions?course_id=${encodeURIComponent(courseId)}&review=1&type=${encodeURIComponent(activeQuizType)}`);
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || 'មិនអាចទាញយកការពិនិត្យចម្លើយបានទេ');
 
-        // 1. Ensure questions are loaded
-        if (!quizData[courseId]) {
-             const { data, error } = await supabase.from('quiz_questions').select('*').eq('course_id', courseId);
-             if (error) {
-                loading = false;
-                console.error('Error loading quiz review questions:', error);
-                return alert('មិនអាចទាញយកសំណួរបានទេ។ សូមព្យាយាមម្តងទៀត។');
-             }
-             if (data && data.length > 0) {
-                quizData[courseId] = data.map(q => ({...q, answer: q.correct_answer}));
-             } else {
-                loading = false;
-                return alert('វគ្គសិក្សានេះមិនទាន់មានសំណួរតេស្តនៅឡើយទេ។');
-             }
-        }
-
-        // 2. Fetch answers from latest passed attempt
-        const { data } = await supabase.from('student_quiz_results')
-            .select('answers')
-            .eq('user_id', currentUser.id)
-            .eq('course_id', courseId)
-            .eq('passed', true)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single();
-
-        loading = false;
-        if (data && data.answers) {
-            userAnswers = data.answers;
+            quizData[courseId] = payload.questions || [];
+            userAnswers = payload.answers || [];
             currentScreen = 'review';
             pushState('#review', { screen: 'review' });
-        } else {
-            alert("No review data available for this course.");
+        } catch (error) {
+            console.error('Error loading quiz review:', error);
+            alert(error.message || 'មិនអាចទាញយកការពិនិត្យចម្លើយបានទេ។');
+        } finally {
+            loading = false;
         }
     }
 
@@ -1103,6 +1127,7 @@
     }
 
     let recordingAttendance = new Set();
+    let attendanceTimeouts = new Set();
 
     async function recordMeetingAttendance(meeting) {
         // បើគ្មានសិស្ស ឬក៏កំពុងតែដំណើរការកត់ត្រាវត្តមាននេះស្រាប់ មិនបាច់ធ្វើអ្វីទៀតទេ
@@ -1124,7 +1149,12 @@
         }
 
         // ដកការរាំងខ្ទប់ចេញវិញបន្ទាប់ពី ៣ វិនាទី (បើចង់ចុចម្តងទៀត)
-        setTimeout(() => { recordingAttendance.delete(meeting.id); recordingAttendance = recordingAttendance; }, 3000);
+        const timeout = setTimeout(() => {
+            recordingAttendance.delete(meeting.id);
+            recordingAttendance = recordingAttendance;
+            attendanceTimeouts.delete(timeout);
+        }, 3000);
+        attendanceTimeouts.add(timeout);
     }
 
     async function generateCertificate(course) {
@@ -1147,23 +1177,30 @@
         try {
             const canvas = document.createElement('canvas');
             
-            let attempt = userQuizAttempts
-                .filter(a => String(a.course_id) === String(course.id) && a.passed && a.type !== 'pre')
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            let summary = userQuizAttempts.find(a =>
+                String(a.course_id) === String(course.id) && a.type !== 'pre' && a.latest_passed_id
+            );
+            let attempt = summary ? {
+                id: summary.latest_passed_id,
+                created_at: summary.latest_passed_at
+            } : null;
 
             if (!attempt) {
-                const res = await fetch('/api/my-quiz-results', {
-                    headers: { 'X-User-Id': currentUser.id }
-                });
+                const res = await apiFetch('/api/my-quiz-results');
                 const payload = await res.json().catch(() => ({}));
-                if (res.ok) {
-                    const attempts = payload.attempts || [];
-                    userQuizAttempts = attempts;
-                    attempt = attempts
-                        .filter(a => String(a.course_id) === String(course.id) && a.passed && a.type !== 'pre')
-                        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-                }
+                if (!res.ok) throw new Error(payload.error || 'មិនអាចផ្ទៀងផ្ទាត់លទ្ធផលតេស្តបានទេ');
+                const attempts = payload.attempts || [];
+                userQuizAttempts = attempts;
+                summary = attempts.find(a =>
+                    String(a.course_id) === String(course.id) && a.type !== 'pre' && a.latest_passed_id
+                );
+                attempt = summary ? {
+                    id: summary.latest_passed_id,
+                    created_at: summary.latest_passed_at
+                } : null;
             }
+
+            if (!attempt) throw new Error('រកមិនឃើញលទ្ធផលតេស្តជាប់សម្រាប់លិខិតបញ្ជាក់នេះទេ');
 
             const certId = attempt?.id ? `CCN-${String(attempt.id).padStart(3, '0')}` : `ID: ${Date.now().toString().slice(-9)}`;
             const dateVal = attempt?.created_at ? new Date(attempt.created_at) : new Date();
@@ -1322,7 +1359,7 @@
     function handleOnline() {
         isOffline = false;
         // ព្យាយាមផ្ទុកទិន្នន័យឡើងវិញពេលមានអ៊ីនធឺណិត
-        loadHomeData();
+        loadHomeData({ force: true });
     }
 
     function handleOffline() {
@@ -1388,28 +1425,19 @@
     }
 
     function getFailCount(courseId) {
-        if (!userQuizAttempts) return 0;
-        const attempts = userQuizAttempts.filter(a => String(a.course_id) === String(courseId));
-        if (attempts.length === 0) return 0;
-        
-        // Sort descending
-        attempts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        
-        let failCount = 0;
-        for (const a of attempts) {
-            if (!a.passed) failCount++;
-            else break; // Reset count on pass
-        }
-        return failCount;
+        const summary = userQuizAttempts.find(a =>
+            String(a.course_id) === String(courseId) && a.type === 'post'
+        );
+        return Number(summary?.fail_count || 0);
     }
 
     // Reactive Cooldown Calculation — re-runs whenever courses or userQuizAttempts change
     $: if (courses.length > 0 && userQuizAttempts.length > 0) {
         const tempCooldowns = {};
         courses.forEach(c => {
-            const attempts = userQuizAttempts.filter(a => String(a.course_id) === String(c.id));
-            if (attempts.length > 0 && !attempts[0].passed) {
-                const lastTime = new Date(attempts[0].created_at).getTime();
+            const summary = userQuizAttempts.find(a => String(a.course_id) === String(c.id) && a.type === 'post');
+            if (summary && !summary.passed) {
+                const lastTime = new Date(summary.created_at).getTime();
                 const failCount = getFailCount(c.id);
                 const configs = getCooldownConfig(c);
                 const duration = configs[Math.min(failCount - 1, configs.length - 1)] || 60;
@@ -1435,7 +1463,11 @@
         selectedMeeting = meeting;
 
         // ពិនិត្យមើលថាតើបានចុះឈ្មោះរួចហើយឬនៅ
-        const { data } = await supabase.from('meeting_registrations').select('id').eq('user_id', currentUser.id).eq('meeting_id', meeting.id).maybeSingle();
+        const { data, error } = await supabase.from('meeting_registrations').select('id').eq('user_id', currentUser.id).eq('meeting_id', meeting.id).maybeSingle();
+        if (error) {
+            console.error('Error checking meeting registration:', error);
+            return alert('មិនអាចពិនិត្យការចុះឈ្មោះបានទេ។ សូមព្យាយាមម្តងទៀត។');
+        }
         
         if (data) {
             if (confirm("អ្នកបានចុះឈ្មោះរួចហើយ! តើអ្នកចង់ចូលរួមការប្រជុំឥឡូវនេះទេ?")) {
@@ -1460,22 +1492,13 @@
         queryKey: ['courses', currentUser?.role], // Refetch when role changes
         queryFn: async () => {
             const courseColumns = 'id, title, description, category, duration, pdf_url, thumbnail_url, is_featured, is_published, created_at, sort_order, cert_template_url, cert_end_date, cert_start_date, post_test_auto_close_date, post_test_fixed_date, quiz_cooldown, has_pre_test, lessons_enabled, evaluation_form_id, cert_config';
-            try {
-                let query = supabase.from('courses').select(courseColumns).is('deleted_at', null).order('sort_order', {ascending: true}).order('created_at', {ascending: false}).limit(100);
-                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
-                    query = query.eq('is_published', true).or(`published_at.is.null,published_at.lte.${new Date().toISOString()}`);
-                }
-                const { data, error } = await query;
-                if (error) throw error;
-                return data || [];
-            } catch (e) {
-                console.warn("Error fetching courses (likely missing deleted_at column), falling back...", e);
-                // Fallback: Fetch without deleted_at filter (ករណីមិនទាន់មាន Column deleted_at)
-                let query = supabase.from('courses').select(courseColumns).order('sort_order', {ascending: true}).order('created_at', {ascending: false}).limit(100);
-                if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') query = query.eq('is_published', true);
-                const { data } = await query;
-                return data || [];
+            let query = supabase.from('courses').select(courseColumns).is('deleted_at', null).order('sort_order', {ascending: true}).order('created_at', {ascending: false}).limit(100);
+            if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
+                query = query.eq('is_published', true).or(`published_at.is.null,published_at.lte.${new Date().toISOString()}`);
             }
+            const { data, error } = await query;
+            if (error) throw error;
+            return data || [];
         },
         staleTime: 1000 * 60 * 5, // Cache for 5 minutes
     });
@@ -1491,16 +1514,23 @@
         _lastEvalCheckKey = key;
         const evalCourses = courses.filter(c => c.evaluation_form_id && passedCourses.includes(String(c.id)));
         if (!evalCourses.length) { evaluationCompletedCourses = []; return; }
-        const { data } = await supabase.from('custom_form_submissions')
+        const { data, error } = await supabase.from('custom_form_submissions')
             .select('form_id').eq('user_id', currentUser.id)
             .in('form_id', evalCourses.map(c => c.evaluation_form_id));
+        if (error) {
+            console.error('Error loading evaluation completions:', error);
+            _lastEvalCheckKey = '';
+            return;
+        }
         const submittedIds = new Set((data || []).map(s => s.form_id));
         evaluationCompletedCourses = evalCourses.filter(c => submittedIds.has(c.evaluation_form_id)).map(c => String(c.id));
     }
 
+    let successToastTimeout;
     function showSuccessToast(msg) {
         successToastMsg = msg;
-        setTimeout(() => successToastMsg = '', 5000); // លាក់ទៅវិញក្រោយ ៥ វិនាទី
+        if (successToastTimeout) clearTimeout(successToastTimeout);
+        successToastTimeout = setTimeout(() => successToastMsg = '', 5000);
     }
 </script>
 
@@ -1735,11 +1765,7 @@
                 {currentUser}
                 on:saved={handleQuizSaved}
                 on:retry={() => startQuiz(activeCourseId, true)}
-                on:review={(e) => {
-                    userAnswers = e.detail.answers;
-                    currentScreen = 'review';
-                    window.history.pushState({ screen: 'review' }, '', '#review');
-                }}
+                on:review={() => reviewQuiz(activeCourseId)}
                 on:close={() => {
                     currentScreen = 'home';
                 }}
@@ -1778,9 +1804,9 @@
                 {assistantTelegram}
                 {tutorials}
                 {evaluationFormUrl}
-                on:close={async () => { await loadHomeData(); currentScreen = 'home'; }}
+                on:close={async () => { await loadHomeData({ force: true }); currentScreen = 'home'; }}
                 on:refresh={() => {
-                    loadHomeData();
+                    loadHomeData({ force: true });
                     queryClient.invalidateQueries({ queryKey: ['courses'] });
                 }}
                 on:refreshSettings={loadSystemSettings}

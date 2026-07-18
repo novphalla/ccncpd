@@ -2,7 +2,6 @@
     import { fade, fly, scale } from 'svelte/transition';
     import { elasticOut } from 'svelte/easing';
     import { createEventDispatcher, onMount, tick } from 'svelte';
-    import LessonPlayer from './admin/LessonPlayer.svelte';
     import PwaInstallBanner from './PwaInstallBanner.svelte';
     import FloatingAssistant from './FloatingAssistant.svelte';
     import MarqueeFooter from './MarqueeFooter.svelte';
@@ -36,6 +35,7 @@
     let showAllCourses = false;
 
     let showLessonPlayer = false;
+    let LessonPlayerComponent = null;
     let selectedCourseForPlayer = null;
     let lessonForPlayer = null; // To hold the specific lesson to play
     let lessonsForPlayer = [];
@@ -733,12 +733,18 @@
             return;
         }
 
-        // Fetch all lessons for the course
-        const { data, error } = await supabase
-            .from('lessons')
-            .select('*')
-            .eq('course_id', course.id)
-            .order('sort_order', { ascending: true });
+        const [lessonModule, lessonsResult] = await Promise.all([
+            LessonPlayerComponent
+                ? Promise.resolve({ default: LessonPlayerComponent })
+                : import('./admin/LessonPlayer.svelte'),
+            supabase
+                .from('lessons')
+                .select('*')
+                .eq('course_id', course.id)
+                .order('sort_order', { ascending: true })
+        ]);
+        LessonPlayerComponent = lessonModule.default;
+        const { data, error } = lessonsResult;
 
         if (error) {
             alert("Error loading lessons: " + error.message);
@@ -778,8 +784,8 @@
     }
 </script>
 
-{#if showLessonPlayer}
-    <LessonPlayer 
+{#if showLessonPlayer && LessonPlayerComponent}
+    <svelte:component this={LessonPlayerComponent}
         course={selectedCourseForPlayer} 
         lesson={lessonForPlayer}
         lessons={lessonsForPlayer}

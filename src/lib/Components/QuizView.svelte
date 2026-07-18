@@ -17,10 +17,8 @@
     let score = 0;
     let showResult = false;
     let selectedOption = null;
-    let isCorrect = null;
     let answers = []; 
     let passed = false;
-    let isSubmitted = false;
     let isFinishing = false;
     let attemptKey = null;
     let xpAwarded = 0;
@@ -42,43 +40,15 @@
         }
     }
 
-    // Helper: រកចម្លើយត្រឹមត្រូវ (Handle various data structures)
-    $: currentCorrectAnswers = (() => {
-        if (!currentQuestion) return [];
-        if (Array.isArray(currentQuestion.answers)) return currentQuestion.answers.map(Number);
-        if (currentQuestion.correct_answer !== undefined) {
-             return Array.isArray(currentQuestion.correct_answer) ? currentQuestion.correct_answer.map(Number) : [Number(currentQuestion.correct_answer)];
-        }
-        if (currentQuestion.answer !== undefined) return [Number(currentQuestion.answer)];
-        return [];
-    })();
-
     function getOptionClasses(originalIndex) {
         const isSelected = selectedOption === originalIndex;
-        const isCorrectAnswer = currentCorrectAnswers.includes(originalIndex);
-
-        if (isSubmitted) {
-            if (quizType === 'pre') {
-                return isSelected ? 'btn-primary text-white border-primary' : 'bg-white border-gray-200 text-gray-400';
-            }
-
-            // Post-test logic
-            if (isSelected) {
-                return isCorrect ? 'btn-success text-black border-success' : 'btn-error text-black border-error';
-            }
-            if (isCorrectAnswer) {
-                return 'btn-success text-black border-success';
-            }
-            return 'bg-white border-gray-200 text-gray-700';
-        } 
-        // Before submission
         return isSelected
             ? 'bg-primary text-white border-primary shadow-lg shadow-primary/40 scale-[1.02] ring-4 ring-primary/20'
             : 'bg-white border-gray-200 hover:border-primary/50 hover:bg-blue-50/30 text-gray-700 hover:shadow-md hover:scale-[1.01]';
     }
 
     function selectOption(index) {
-        if (isSubmitted || isFinishing) return;
+        if (isFinishing) return;
         selectedOption = index;
     }
 
@@ -92,31 +62,19 @@
     }
 
     function handleNext() {
-        if (isFinishing) return;
+        if (isFinishing || selectedOption === null) return;
+        answers[currentQuestionIndex] = selectedOption;
 
-        if (!isSubmitted) {
-            isCorrect = currentCorrectAnswers.includes(selectedOption);
-            answers[currentQuestionIndex] = selectedOption;
-
-            if (isCorrect) {
-                score++;
-                // Note: XP is now awarded in bulk at the end of the quiz to reduce database requests
-            }
-            isSubmitted = true;
-        } else {
+        if (currentQuestionIndex < questions.length - 1) {
             nextQuestion();
+        } else {
+            finishQuiz();
         }
     }
 
     function nextQuestion() {
-        if (currentQuestionIndex < questions.length - 1) {
-            currentQuestionIndex++;
-            selectedOption = null;
-            isCorrect = null;
-            isSubmitted = false;
-        } else {
-            finishQuiz();
-        }
+        currentQuestionIndex++;
+        selectedOption = null;
     }
 
     async function triggerConfetti() {
@@ -165,48 +123,65 @@
 
         isFinishing = true;
         attemptKey ||= createAttemptKey();
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            const headers = { 'Content-Type': 'application/json' };
+            if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
 
-        const { data, error } = await supabase.rpc('submit_quiz_and_update_xp', {
-            p_user_id: currentUser.id,
-            p_course_id: courseId,
-            p_answers: answers,
-            p_type: quizType,
-            p_question_ids: questions.map(q => q.id),
-            p_attempt_key: attemptKey
-        });
+            const response = await fetch('/api/submit-quiz', {
+                method: 'POST',
+                headers,
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    courseId,
+                    answers,
+                    type: quizType,
+                    questionIds: questions.map(question => question.id),
+                    attemptKey
+                })
+            });
+            const savedResult = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                if (response.status === 429 && savedResult.error?.startsWith('QUIZ_COOLDOWN:')) {
+                    throw new Error('មិនទាន់ដល់ពេលអាចធ្វើតេស្តម្តងទៀតបានទេ។');
+                }
+                if (response.status === 409) {
+                    throw new Error('អ្នកបានបញ្ចប់តេស្តនេះរួចហើយ។');
+                }
+                throw new Error(savedResult.error || 'មិនអាចរក្សាទុកលទ្ធផលតេស្តបានទេ');
+            }
+            if (!savedResult?.result_id || !Number.isFinite(Number(savedResult.correct_count))) {
+                throw new Error('Server បានផ្ញើលទ្ធផលមិនត្រឹមត្រូវ។ សូមព្យាយាមម្តងទៀត។');
+            }
 
-        if (error) {
+            score = Number(savedResult.correct_count);
+            passed = savedResult.passed === true;
+            xpAwarded = Number(savedResult.xp_awarded || 0);
+            showResult = true;
+
+            dispatch('saved', {
+                attempt: {
+                    id: savedResult.result_id,
+                    course_id: courseId,
+                    passed,
+                    created_at: savedResult.created_at || new Date().toISOString(),
+                    type: quizType
+                },
+                newXp: savedResult.new_xp,
+                newCpdTotal: savedResult.new_cpd_total
+            });
+
+            if (passed) {
+                dispatch('complete');
+                triggerConfetti();
+            } else {
+                startCooldownTimer();
+            }
+        } catch (error) {
+            console.error('Error saving quiz result:', error);
+            alert('បរាជ័យក្នុងការរក្សាទុកលទ្ធផលតេស្ត: ' + error.message);
+        } finally {
             isFinishing = false;
-            console.error("Error saving quiz result:", error);
-            alert("បរាជ័យក្នុងការរក្សាទុកលទ្ធផលតេស្ត: " + error.message);
-            return;
-        }
-
-        const savedResult = Array.isArray(data) ? data[0] : data;
-        score = Number(savedResult?.correct_count ?? score);
-        passed = savedResult?.passed === true;
-        xpAwarded = Number(savedResult?.xp_awarded || 0);
-        showResult = true;
-        isFinishing = false;
-
-        dispatch('saved', {
-            attempt: {
-                id: savedResult?.result_id,
-                course_id: courseId,
-                passed,
-                created_at: savedResult?.created_at || new Date().toISOString(),
-                type: quizType
-            },
-            newXp: savedResult?.new_xp,
-            newCpdTotal: savedResult?.new_cpd_total
-        });
-
-        if (passed) {
-            dispatch('complete');
-            triggerConfetti();
-        } else {
-            // បើធ្លាក់ ចាប់ផ្តើមរាប់ថយក្រោយ
-            startCooldownTimer();
         }
     }
 </script>
@@ -235,18 +210,11 @@
                     <div class="flex flex-col gap-4">
                         {#each shuffledOptions as option}
                             <button 
-                                disabled={isSubmitted}
+                                disabled={isFinishing}
                                 on:click={() => selectOption(option.originalIndex)}
                                 class="btn h-auto py-4 px-6 justify-between text-left normal-case text-base border-2 rounded-2xl transition-all duration-300 {getOptionClasses(option.originalIndex)}"
                             >
                                 <span class="font-medium">{option.text}</span>
-                                {#if isSubmitted && quizType !== 'pre'}
-                                    {#if selectedOption === option.originalIndex}
-                                        <span class="text-xl">{isCorrect ? '✅' : '❌'}</span>
-                                    {:else if currentCorrectAnswers.includes(option.originalIndex)}
-                                        <span class="text-xl">✅</span>
-                                    {/if}
-                                {/if}
                             </button>
                         {/each}
                     </div>
@@ -257,11 +225,7 @@
                                 {#if isFinishing}
                                     <span class="loading loading-spinner loading-sm"></span>
                                 {/if}
-                                {#if !isSubmitted}
-                                    {quizType === 'pre' ? 'បញ្ជូនចម្លើយ' : 'ពិនិត្យចម្លើយ'}
-                                {:else}
-                                    {currentQuestionIndex === questions.length - 1 ? 'បញ្ចប់' : 'បន្ទាប់ →'}
-                                {/if}
+                                {currentQuestionIndex === questions.length - 1 ? 'បញ្ចប់' : 'បន្ទាប់ →'}
                             </button>
                         </div>
                     {/if}
@@ -325,7 +289,7 @@
 
                     <div class="flex flex-col gap-3">
                         {#if !passed}
-                            <button on:click={() => dispatch('review', { answers })} class="btn btn-warning w-full btn-lg text-white shadow-md">📝 មើលចម្លើយដែលខុស</button>
+                            <button on:click={() => dispatch('review')} class="btn btn-warning w-full btn-lg text-white shadow-md">📝 មើលចម្លើយដែលខុស</button>
                             <button on:click={() => dispatch('retry')} class="btn btn-outline w-full btn-lg relative overflow-hidden" disabled={remainingTimeDisplay !== ''}>
                                 {#if remainingTimeDisplay}
                                     <div class="absolute inset-0 bg-gray-300 origin-left transition-all duration-1000 ease-linear" style="width: {cooldownProgress}%;"></div>

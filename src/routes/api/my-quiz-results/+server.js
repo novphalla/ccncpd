@@ -1,19 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { createClient } from '@supabase/supabase-js';
-import { PUBLIC_SUPABASE_URL } from '$env/static/public';
-import { env } from '$env/dynamic/private';
-
-function serviceClient(platform) {
-    const serviceKey = platform?.env?.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!serviceKey) return null;
-    return createClient(PUBLIC_SUPABASE_URL, serviceKey, {
-        auth: { persistSession: false, autoRefreshToken: false }
-    });
-}
-
-function validUuid(value) {
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
-}
+import { getRequestUserId, serviceClient } from '$lib/server/requestAuth';
 
 function unavailable() {
     return json({
@@ -22,32 +8,57 @@ function unavailable() {
     }, { status: 503 });
 }
 
-export async function GET({ request, platform }) {
+function summarizeAttempts(rows) {
+    const groups = new Map();
+    for (const row of rows || []) {
+        const key = `${row.course_id}:${row.type}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(row);
+    }
+
+    return [...groups.values()].map(group => {
+        const latest = group[0];
+        const latestPassed = group.find(attempt => attempt.passed);
+        const passedAt = latestPassed ? new Date(latestPassed.created_at).getTime() : -Infinity;
+        return {
+            ...latest,
+            fail_count: group.filter(attempt =>
+                !attempt.passed && new Date(attempt.created_at).getTime() > passedAt
+            ).length,
+            latest_passed_id: latestPassed?.id || null,
+            latest_passed_at: latestPassed?.created_at || null
+        };
+    });
+}
+
+export async function GET(event) {
     try {
-        const supabase = serviceClient(platform);
+        const userId = await getRequestUserId(event);
+        if (!userId) return json({ error: 'Unauthorized' }, { status: 401 });
+
+        const supabase = serviceClient(event.platform);
         if (!supabase) return unavailable();
 
-        const userId = request.headers.get('X-User-Id');
-        if (!validUuid(userId)) return json({ error: 'Unauthorized' }, { status: 401 });
+        let { data, error } = await supabase.rpc('get_quiz_attempt_summary', {
+            p_user_id: userId
+        });
 
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select('id')
-            .eq('id', userId)
-            .maybeSingle();
-
-        if (userError) return json({ error: userError.message, code: userError.code }, { status: 400 });
-        if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
-
-        const { data, error } = await supabase
-            .from('student_quiz_results')
-            .select('id, course_id, passed, created_at, type')
-            .eq('user_id', user.id)
-            .order('created_at', { ascending: false })
-            .limit(200);
+        // Keeps an auto-deploy working while the matching DB migration is being applied.
+        if (error && ['PGRST202', '42883'].includes(error.code)) {
+            const fallback = await supabase
+                .from('student_quiz_results')
+                .select('id, course_id, passed, created_at, type')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: false })
+                .limit(500);
+            data = summarizeAttempts(fallback.data);
+            error = fallback.error;
+        }
 
         if (error) return json({ error: error.message, code: error.code }, { status: 400 });
-        return json({ attempts: data || [] });
+        return json({ attempts: data || [] }, {
+            headers: { 'Cache-Control': 'private, no-store' }
+        });
     } catch (error) {
         console.error('my-quiz-results API error:', error);
         return json({
