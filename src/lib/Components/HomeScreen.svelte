@@ -168,20 +168,23 @@
     async function loadInviteUnlocks() {
         unlockedUserId = currentUser?.id || null;
         unlockedCourseIds = new Set();
-        if (!supabase || !unlockedUserId) return;
+        if (!unlockedUserId) return;
 
-        const { data, error } = await supabase
-            .from('course_invite_redemptions')
-            .select('course_id')
-            .eq('user_id', unlockedUserId);
+        let data = null;
+        let error = null;
+        try {
+            const response = await fetch('/api/course-invite-codes?mode=unlocks');
+            data = await response.json().catch(() => ({}));
+            if (!response.ok) error = data;
+        } catch (requestError) {
+            error = requestError;
+        }
 
         if (error) {
-            if (error.code !== '42P01' && error.code !== 'PGRST205') {
-                console.warn('Could not load invite unlocks:', error.message);
-            }
+            console.warn('Could not load invite unlocks:', error.message || error.error || error);
             return;
         }
-        unlockedCourseIds = new Set((data || []).map(row => String(row.course_id)));
+        unlockedCourseIds = new Set((data.unlocks || []).map(row => String(row.course_id)));
     }
 
     async function redeemInviteCode() {
@@ -198,12 +201,15 @@
 
         inviteCodeLoading = true;
         try {
-            const { data, error } = await supabase.rpc('redeem_course_invite_code', {
-                p_invite_code: code
+            const response = await fetch('/api/course-invite-codes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'redeem', code })
             });
-            if (error) throw error;
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'Invalid invite code');
 
-            const invite = Array.isArray(data) ? data[0] : data;
+            const invite = data;
             if (!invite?.course_id) {
                 inviteCodeMessage = 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានបិទ';
                 return;
