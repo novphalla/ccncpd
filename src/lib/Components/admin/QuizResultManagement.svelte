@@ -5,6 +5,7 @@
     export let supabase;
     export let courses = [];
     export let loginLogoUrl = '';
+    export let currentUser = null;
 
     const dispatch = createEventDispatcher();
 
@@ -33,7 +34,7 @@
             }
         }, 300);
     }
-    let selectedCourseFilter = 'none'; // 'none'=ជ្រើសរើស, ''=គ្រប់វគ្គ, courseId=វគ្គជាក្លាក់;
+    let selectedCourseFilter = ''; // ''=គ្រប់វគ្គ, courseId=វគ្គជាក់លាក់
     let quizStartDate = '';
     let quizEndDate = '';
     let quizPage = 1;
@@ -77,6 +78,28 @@
     let excelImportLoading = false;
     let excelImportError = '';
     let excelReplaceMode = true; // true = replace old records, false = append
+
+    async function authHeaders(body = false) {
+        const headers = body ? { 'Content-Type': 'application/json' } : {};
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
+        return headers;
+    }
+
+    async function writeQuizResults(method, body = null, query = '') {
+        try {
+            const response = await fetch(`/api/quiz-results${query}`, {
+                method,
+                headers: await authHeaders(Boolean(body)),
+                ...(body ? { body: JSON.stringify(body) } : {})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'មិនអាចរក្សាទុកទិន្នន័យបានទេ');
+            return { data, error: null };
+        } catch (error) {
+            return { data: null, error };
+        }
+    }
     $: excelValidCount = excelImportRows.filter(r => r.valid).length;
     $: excelErrorCount = excelImportRows.filter(r => !r.valid).length;
 
@@ -160,19 +183,9 @@
         if (win) { win.document.write(html); win.document.close(); }
     }
 
-    onMount(async () => {
-        // ស្វែងរក course ចុងក្រោយដែលមានការប្រឡង ដើម្បីបង្ហាញដោយស្វ័យប្រវត្តិ
-        const { data: latest } = await supabase
-            .from('student_quiz_results')
-            .select('course_id')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-        if (latest?.course_id) {
-            selectedCourseFilter = String(latest.course_id);
-        } else {
-            selectedCourseFilter = 'none';
-        }
+    onMount(() => {
+        // បង្ហាញលទ្ធផលគ្រប់វគ្គជាលំនាំដើម ដើម្បីឱ្យ admin មិនច្រឡំថាទិន្នន័យបាត់។
+        selectedCourseFilter = '';
         loadQuizResults();
     });
 
@@ -198,36 +211,29 @@
     }
 
     async function loadQuizResults() {
-        // 'none' = មិនទាន់ជ្រើស → បង្ហាញទទេ
-        if (selectedCourseFilter === 'none') {
-            allDeduplicatedResults = [];
-            allRawQuizResults = [];
-            applyFiltersAndPagination();
-            return;
-        }
-
         loadingQuizResults = true;
         let allFetchedData = [];
-        let hasMore = true; 
-        let from = 0; 
-        const step = 1000;
 
-        while (hasMore) {
-            let query = supabase.from('student_quiz_results')
-                .select('id, user_id, course_id, score, passed, type, created_at, users!inner(full_name, name_latin, phone_number, gender, profile_data, avatar_url), courses!inner(title, cpd_points, cert_template_url)')
-                .order('created_at', { ascending: false });
+        try {
+            const params = new URLSearchParams();
+            if (selectedCourseFilter) params.set('course_id', selectedCourseFilter);
 
-            // filter course_id នៅលើ DB ដើម្បីមិនទាញទិន្នន័យទាំងអស់
-            if (selectedCourseFilter && selectedCourseFilter !== 'none') {
-                query = query.eq('course_id', selectedCourseFilter);
+            const res = await fetch(`/api/quiz-results?${params.toString()}`, {
+                headers: await authHeaders()
+            });
+            const payload = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+                throw new Error(payload?.error || 'មិនអាចទាញយកប្រវត្តិប្រឡងបានទេ');
             }
 
-            const { data, error } = await query.range(from, from + step - 1);
-            if (error || !data || data.length === 0) break;
-
-            allFetchedData.push(...data);
-            from += step;
-            if (data.length < step) hasMore = false;
+            allFetchedData = payload.results || [];
+        } catch (error) {
+            console.error('Error loading quiz results:', error);
+            allFetchedData = [];
+            alert(`មិនអាចទាញយកប្រវត្តិប្រឡងបានទេ: ${error.message || error}`);
+        } finally {
+            loadingQuizResults = false;
         }
 
         // រាប់ចំនួនដងដែលសិស្សម្នាក់ៗបានប្រឡង
@@ -253,12 +259,10 @@
         allRawQuizResults = allFetchedData;
 
         applyFiltersAndPagination();
-        loadingQuizResults = false;
     }
-
     function applyFiltersAndPagination() {
         filteredResults = allDeduplicatedResults.filter(r => {
-            if (selectedCourseFilter && selectedCourseFilter !== 'none' && String(r.course_id) !== String(selectedCourseFilter)) return false;
+            if (selectedCourseFilter && String(r.course_id) !== String(selectedCourseFilter)) return false;
             
             if (quizStatusFilter === 'passed' && !r.passed) return false;
             if (quizStatusFilter === 'failed' && r.passed) return false;
@@ -353,7 +357,7 @@
     async function deleteHistoryRecord(recordId) {
         if (!confirm("តើអ្នកពិតជាចង់លុបប្រវត្តិប្រឡងនេះមែនទេ? (ទិន្នន័យនេះនឹងត្រូវលុបជាស្ថាពរ)")) return;
         
-        const { error } = await supabase.from('student_quiz_results').delete().eq('id', recordId);
+        const { error } = await writeQuizResults('DELETE', null, `?id=${encodeURIComponent(recordId)}`);
         if (error) {
             alert("មានបញ្ហាក្នុងការលុប: " + error.message);
         } else {
@@ -380,10 +384,11 @@
         const passingScore = course?.quiz_passing_score || 70;
         const newPassedStatus = newScore >= passingScore;
 
-        const { error } = await supabase
-            .from('student_quiz_results')
-            .update({ score: newScore, passed: newPassedStatus })
-            .eq('id', historyRecord.id);
+        const { error } = await writeQuizResults('PATCH', {
+            id: historyRecord.id,
+            score: newScore,
+            passed: newPassedStatus
+        });
 
         if (error) {
             alert("មានបញ្ហាក្នុងការកែប្រែពិន្ទុ: " + error.message);
@@ -526,7 +531,7 @@
 
     async function resetQuizFilters() {
         quizSearch = '';
-        selectedCourseFilter = 'none';
+        selectedCourseFilter = '';
         quizStartDate = '';
         quizEndDate = '';
         quizStatusFilter = '';
@@ -587,7 +592,7 @@
             answers: {},
             ...(manualScoreDate ? { created_at: new Date(manualScoreDate).toISOString() } : {})
         }));
-        const { error } = await supabase.from('student_quiz_results').insert(rows);
+        const { error } = await writeQuizResults('POST', { rows });
         manualScoreLoading = false;
         if (error) { alert('មានបញ្ហា: ' + error.message); return; }
         showManualScoreModal = false;
@@ -695,16 +700,13 @@
             created_at: new Date(r.date || manualScoreDate).toISOString()
         }));
 
-        if (excelReplaceMode) {
-            const userIds = [...new Set(validRows.map(r => r.user_id))];
-            const typeFilter = [...new Set(validRows.map(r => r.type))];
-            await supabase.from('student_quiz_results').delete()
-                .eq('course_id', manualScoreCourseId)
-                .in('type', typeFilter)
-                .in('user_id', userIds);
-        }
+        const replace = excelReplaceMode ? {
+            course_id: manualScoreCourseId,
+            user_ids: [...new Set(validRows.map(r => r.user_id))],
+            types: [...new Set(validRows.map(r => r.type))]
+        } : null;
 
-        const { error } = await supabase.from('student_quiz_results').insert(rows);
+        const { error } = await writeQuizResults('POST', { rows, replace });
         manualScoreLoading = false;
         if (error) { alert('មានបញ្ហា: ' + error.message); return; }
         showManualScoreModal = false;
@@ -1414,9 +1416,7 @@
                         </td>
                     </tr>
                 {:else}
-                    {#if selectedCourseFilter === 'none'}
-                        <tr><td colspan="8" class="text-center py-12 text-gray-400 italic">👆 សូមជ្រើសរើសវគ្គសិក្សា ដើម្បីមើលលទ្ធផល</td></tr>
-                    {:else if !selectedCourseFilter && loadingQuizResults}
+                    {#if !selectedCourseFilter && loadingQuizResults}
                         <tr><td colspan="8" class="text-center py-12"><span class="loading loading-spinner loading-md text-primary"></span> <span class="text-sm text-gray-500 ml-2">កាលទាញយកវគ្គទាំងអស់... (អាចចំណាយពេលបន្តិច)</span></td></tr>
                     {:else if loadingQuizResults}
                         <tr><td colspan="8" class="text-center py-12"><span class="loading loading-spinner loading-md text-primary"></span></td></tr>
