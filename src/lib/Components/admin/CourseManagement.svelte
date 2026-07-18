@@ -342,24 +342,45 @@
         newInviteCode = { ...newInviteCode };
     }
 
+    function inviteApiHeaders(extra = {}) {
+        return {
+            'X-User-Id': currentUser?.id || '',
+            ...extra
+        };
+    }
+
+    function apiErrorMessage(error) {
+        const code = error?.code || '';
+        const message = error?.message || error?.error || String(error || 'Unknown error');
+        if (code === 'SERVICE_ROLE_KEY_MISSING') return 'មិនទាន់កំណត់ SUPABASE_SERVICE_ROLE_KEY នៅ Cloudflare Pages។';
+        if (code === '42P01' || code === 'PGRST205') return 'មិនទាន់មានតារាងលេខកូដវគ្គ សូមដំណើរការ migration ជាមុនសិន។';
+        return message;
+    }
+
     async function loadCourseInviteCodes(courseId) {
         if (!courseId) {
             courseInviteCodes = [];
             return;
         }
         inviteCodeLoading = true;
-        const { data, error } = await supabase
-            .from('course_invite_codes')
-            .select('*')
-            .eq('course_id', courseId)
-            .order('created_at', { ascending: false });
+        let data = null;
+        let error = null;
+        try {
+            const res = await fetch(`/api/course-invite-codes?course_id=${encodeURIComponent(courseId)}`, {
+                headers: inviteApiHeaders()
+            });
+            data = await res.json();
+            if (!res.ok) error = data;
+        } catch (err) {
+            error = err;
+        }
         inviteCodeLoading = false;
         if (error) {
-            if (error.code !== '42P01' && error.code !== 'PGRST205') alert('Error loading invite codes: ' + error.message);
+            alert('មិនអាចទាញយកលេខកូដវគ្គបានទេ: ' + apiErrorMessage(error));
             courseInviteCodes = [];
             return;
         }
-        courseInviteCodes = data || [];
+        courseInviteCodes = data?.inviteCodes || [];
     }
 
     async function createInviteCode() {
@@ -385,27 +406,56 @@
         };
 
         inviteCodeLoading = true;
-        const { error } = await supabase.from('course_invite_codes').insert(payload);
+        let error = null;
+        try {
+            const res = await fetch('/api/course-invite-codes', {
+                method: 'POST',
+                headers: inviteApiHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (!res.ok) error = data;
+        } catch (err) {
+            error = err;
+        }
         inviteCodeLoading = false;
-        if (error) return alert('Error: ' + error.message);
+        if (error) return alert('មានបញ្ហា: ' + apiErrorMessage(error));
 
         newInviteCode = { code: '', description: '', max_uses: '', expires_at: '', auto_enroll: false };
         await loadCourseInviteCodes(courseId);
     }
 
     async function toggleInviteCode(code) {
-        const { error } = await supabase
-            .from('course_invite_codes')
-            .update({ is_active: !code.is_active, updated_at: new Date().toISOString() })
-            .eq('id', code.id);
-        if (error) return alert('Error: ' + error.message);
+        let error = null;
+        try {
+            const res = await fetch('/api/course-invite-codes', {
+                method: 'PATCH',
+                headers: inviteApiHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ id: code.id, is_active: !code.is_active })
+            });
+            const data = await res.json();
+            if (!res.ok) error = data;
+        } catch (err) {
+            error = err;
+        }
+        if (error) return alert('មានបញ្ហា: ' + apiErrorMessage(error));
         await loadCourseInviteCodes(editingCourse.id);
     }
 
     async function deleteInviteCode(code) {
-        if (!confirm(`តើអ្នកពិតជាចង់លុប invite code "${code.code}" មែនទេ?`)) return;
-        const { error } = await supabase.from('course_invite_codes').delete().eq('id', code.id);
-        if (error) return alert('Error: ' + error.message);
+        if (!confirm(`តើអ្នកពិតជាចង់លុបលេខកូដ "${code.code}" មែនទេ?`)) return;
+        let error = null;
+        try {
+            const res = await fetch(`/api/course-invite-codes?id=${encodeURIComponent(code.id)}`, {
+                method: 'DELETE',
+                headers: inviteApiHeaders()
+            });
+            const data = await res.json();
+            if (!res.ok) error = data;
+        } catch (err) {
+            error = err;
+        }
+        if (error) return alert('មានបញ្ហា: ' + apiErrorMessage(error));
         await loadCourseInviteCodes(editingCourse.id);
     }
 
