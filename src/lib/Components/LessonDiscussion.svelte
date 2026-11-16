@@ -54,6 +54,34 @@
         return translations[message] || message;
     }
 
+    async function markCommentsRead() {
+        if (!lesson?.id || lesson.id === 'fallback' || !course?.id || !currentUser) return;
+
+        const latestCommentTime = comments.reduce((latest, comment) => {
+            const createdAt = new Date(comment.created_at).getTime();
+            return Number.isNaN(createdAt) ? latest : Math.max(latest, createdAt);
+        }, 0);
+
+        try {
+            const response = await fetch('/api/lesson-comments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    action: 'mark_read',
+                    lesson_id: lesson.id,
+                    course_id: course.id,
+                    seen_at: latestCommentTime ? new Date(latestCommentTime).toISOString() : new Date().toISOString()
+                })
+            });
+
+            if (!response.ok) return;
+            dispatch('read', { lesson_id: lesson.id, course_id: course.id });
+        } catch (error) {
+            console.warn('Unable to mark lesson discussion as read:', error);
+        }
+    }
+
     async function loadComments(showLoader = false) {
         if (!lesson?.id || lesson.id === 'fallback' || !currentUser) return;
         if (showLoader) loading = true;
@@ -69,6 +97,7 @@
             comments = payload.comments || [];
             errorMessage = '';
             dispatch('count', comments.filter(comment => comment.status === 'visible').length);
+            await markCommentsRead();
         } catch (error) {
             errorMessage = error.message || 'មិនអាចទាញយកមតិបានទេ។';
         } finally {

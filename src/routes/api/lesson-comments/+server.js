@@ -157,6 +157,50 @@ export async function GET(event) {
         const actor = await requireActor(event, supabase);
         if (!actor) return json({ error: 'Unauthorized' }, { status: 401 });
 
+        const requestedCourseIds = event.url.searchParams.get('course_ids');
+        if (requestedCourseIds !== null) {
+            const courseIds = [...new Set(requestedCourseIds
+                .split(',')
+                .map(value => value.trim())
+                .filter(Boolean))];
+
+            if (courseIds.length < 1 || courseIds.length > 100 || courseIds.some(id => !validUuid(id))) {
+                return json({ error: 'Invalid course_ids' }, { status: 400 });
+            }
+
+            const { data: requestedCourses, error: coursesError } = await supabase
+                .from('courses')
+                .select('id, is_published')
+                .in('id', courseIds);
+
+            if (coursesError) return dbError(coursesError);
+
+            const allowedCourseIds = (requestedCourses || [])
+                .filter(course => course.is_published || ADMIN_ROLES.has(actor.role))
+                .map(course => course.id);
+
+            if (allowedCourseIds.length === 0) {
+                return json({ courses: {}, lessons: {} });
+            }
+
+            const { data: unreadRows, error: unreadError } = await supabase.rpc(
+                'get_lesson_comment_unread_counts',
+                { p_user_id: actor.id, p_course_ids: allowedCourseIds }
+            );
+
+            if (unreadError) return dbError(unreadError);
+
+            const courseCounts = {};
+            const lessonCounts = {};
+            for (const row of unreadRows || []) {
+                const count = Number(row.unread_count) || 0;
+                lessonCounts[row.lesson_id] = count;
+                courseCounts[row.course_id] = (courseCounts[row.course_id] || 0) + count;
+            }
+
+            return json({ courses: courseCounts, lessons: lessonCounts });
+        }
+
         const lessonId = event.url.searchParams.get('lesson_id');
         const access = await requireLessonAccess(supabase, actor, lessonId);
         const denied = accessError(access);
@@ -214,6 +258,33 @@ export async function POST(event) {
 
         const body = await requestBody(event.request);
         if (!body) return json({ error: 'Invalid request body' }, { status: 400 });
+
+        if (body.action === 'mark_read') {
+            const access = await requireLessonAccess(supabase, actor, body.lesson_id, body.course_id);
+            const denied = accessError(access);
+            if (denied) return denied;
+
+            const now = new Date();
+            const suppliedSeenAt = new Date(body.seen_at || now.toISOString());
+            const lastReadAt = Number.isNaN(suppliedSeenAt.getTime()) || suppliedSeenAt > now
+                ? now.toISOString()
+                : suppliedSeenAt.toISOString();
+
+            const { error } = await supabase.from('lesson_comment_reads').upsert({
+                user_id: actor.id,
+                lesson_id: access.lesson.id,
+                last_read_at: lastReadAt,
+                updated_at: now.toISOString()
+            }, { onConflict: 'user_id,lesson_id' });
+
+            if (error) return dbError(error);
+            return json({
+                success: true,
+                course_id: access.course.id,
+                lesson_id: access.lesson.id,
+                last_read_at: lastReadAt
+            });
+        }
 
         if (body.action === 'report') {
             if (!validUuid(body.comment_id)) {

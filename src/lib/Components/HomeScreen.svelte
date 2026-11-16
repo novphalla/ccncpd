@@ -46,6 +46,9 @@
     let discussionLoading = false;
     let showDiscussionPicker = false;
     let showStandaloneDiscussion = false;
+    let discussionUnreadByCourse = {};
+    let discussionUnreadByLesson = {};
+    let loadedUnreadSignature = '';
     let showTutorialModal = false;
     let courseEnrollments = {};
     let locallyRegisteredCourseIds = new Set();
@@ -97,7 +100,11 @@
             currentTime = new Date();
             now = Date.now();
         }, 1000);
-        return () => clearInterval(interval);
+        const discussionInterval = setInterval(() => loadDiscussionUnread(), 30_000);
+        return () => {
+            clearInterval(interval);
+            clearInterval(discussionInterval);
+        };
     });
 
     $: if (currentUser?.id && currentUser.id !== enrollmentUserId) {
@@ -111,6 +118,18 @@
     // Pass this object into template helpers so Svelte tracks enrollment changes.
     $: enrollmentUiState = { enrollments: courseEnrollments, localIds: locallyRegisteredCourseIds };
     $: visibleCourses = courses.filter(course => canViewCourse(course, enrollmentUiState));
+    $: unreadCourseSignature = currentUser?.id
+        ? `${currentUser.id}:${visibleCourses.map(course => course.id).sort().join(',')}`
+        : '';
+    $: if (unreadCourseSignature && unreadCourseSignature !== loadedUnreadSignature) {
+        loadedUnreadSignature = unreadCourseSignature;
+        loadDiscussionUnread();
+    }
+    $: if (!unreadCourseSignature && loadedUnreadSignature) {
+        loadedUnreadSignature = '';
+        discussionUnreadByCourse = {};
+        discussionUnreadByLesson = {};
+    }
 
     // Extract unique categories from visible courses
     $: categories = ['All', ...new Set(visibleCourses.map(c => c.category).filter(Boolean))];
@@ -847,6 +866,54 @@
         showStandaloneDiscussion = true;
     }
 
+    async function loadDiscussionUnread() {
+        if (!currentUser?.id) return;
+
+        const courseIds = [...new Set(visibleCourses.map(course => course.id).filter(Boolean))];
+        if (courseIds.length === 0) {
+            discussionUnreadByCourse = {};
+            discussionUnreadByLesson = {};
+            return;
+        }
+
+        try {
+            const chunks = [];
+            for (let index = 0; index < courseIds.length; index += 100) {
+                chunks.push(courseIds.slice(index, index + 100));
+            }
+
+            const payloads = await Promise.all(chunks.map(async chunk => {
+                const response = await fetch(`/api/lesson-comments?course_ids=${encodeURIComponent(chunk.join(','))}`, {
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || 'Unable to load unread discussions');
+                return payload;
+            }));
+
+            discussionUnreadByCourse = Object.assign({}, ...payloads.map(payload => payload.courses || {}));
+            discussionUnreadByLesson = Object.assign({}, ...payloads.map(payload => payload.lessons || {}));
+        } catch (error) {
+            console.warn('Unable to load lesson discussion unread counts:', error);
+        }
+    }
+
+    function handleDiscussionRead(event) {
+        const detail = event?.detail || event || {};
+        const courseId = detail.course_id;
+        const lessonId = detail.lesson_id;
+        const clearedCount = Number(discussionUnreadByLesson[lessonId]) || 0;
+
+        if (!courseId || !lessonId || clearedCount < 1) return;
+
+        discussionUnreadByLesson = { ...discussionUnreadByLesson, [lessonId]: 0 };
+        discussionUnreadByCourse = {
+            ...discussionUnreadByCourse,
+            [courseId]: Math.max(0, (Number(discussionUnreadByCourse[courseId]) || 0) - clearedCount)
+        };
+    }
+
     async function openCourseDiscussion(course) {
         if (discussionLoading) return;
 
@@ -921,6 +988,7 @@
         lessons={lessonsForPlayer}
         currentUser={currentUser}
         on:close={() => showLessonPlayer = false}
+        on:discussionRead={handleDiscussionRead}
     />
 {/if}
 
@@ -1325,6 +1393,11 @@
                                             disabled={discussionLoading && discussionCourse?.id === course.id}
                                         >
                                             {discussionLoading && discussionCourse?.id === course.id ? 'កំពុងបើក...' : '💬 ពិភាក្សាមេរៀន'}
+                                            {#if (discussionUnreadByCourse[course.id] || 0) > 0}
+                                                <span class="absolute -right-2 -top-2 grid min-w-6 h-6 place-items-center rounded-full border-2 border-white bg-red-600 px-1 text-[11px] font-black text-white shadow">
+                                                    {discussionUnreadByCourse[course.id] > 99 ? '99+' : discussionUnreadByCourse[course.id]}
+                                                </span>
+                                            {/if}
                                         </button>
                                     {/if}
                                     <div class="w-full">
@@ -1453,7 +1526,13 @@
                     >
                         <span class="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal-100 text-sm font-black text-teal-700">{index + 1}</span>
                         <span class="min-w-0 flex-1 whitespace-normal font-bold">{lesson.title || `មេរៀនទី ${index + 1}`}</span>
-                        <span class="text-teal-700">💬</span>
+                        {#if (discussionUnreadByLesson[lesson.id] || 0) > 0}
+                            <span class="grid min-w-6 h-6 place-items-center rounded-full bg-red-600 px-1 text-[11px] font-black text-white">
+                                {discussionUnreadByLesson[lesson.id] > 99 ? '99+' : discussionUnreadByLesson[lesson.id]}
+                            </span>
+                        {:else}
+                            <span class="text-teal-700">💬</span>
+                        {/if}
                     </button>
                 {/each}
             </div>
@@ -1475,6 +1554,7 @@
             course={discussionCourse}
             currentUser={currentUser}
             on:close={closeStandaloneDiscussion}
+            on:read={handleDiscussionRead}
         />
     </div>
 {/if}

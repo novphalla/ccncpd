@@ -694,6 +694,7 @@
                 {currentUser}
                 on:close={() => showDiscussion = false}
                 on:count={(event) => discussionCount = event.detail}
+                on:read={(event) => dispatch('discussionRead', event.detail)}
             />
         {/if}
 
