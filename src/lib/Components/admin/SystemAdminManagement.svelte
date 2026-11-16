@@ -35,12 +35,11 @@
             
             // ទាញយកប្រវត្តិថ្ងៃតែងតាំងពី Activity Logs
             if (systemAdmins.length > 0) {
-                const { data: logs } = await supabase
-                    .from('admin_logs')
-                    .select('details, created_at')
-                    .eq('action', 'Promote Admin')
-                    .order('created_at', { ascending: false })
-                    .limit(500);
+                const res = await fetch('/api/admin-logs?action=Promote%20Admin&pageSize=500', {
+                    headers: { 'X-User-Id': currentUser?.id || '' }
+                });
+                const payload = await res.json().catch(() => ({}));
+                const logs = res.ok ? (payload.logs || []) : [];
                     
                 if (logs) {
                     let tempDates = {};
@@ -56,10 +55,10 @@
 
     async function logAdminAction(action, details = '') {
         if (!currentUser?.id) return;
-        await supabase.from('admin_logs').insert({
-            admin_id: currentUser.id,
-            action,
-            details
+        await fetch('/api/admin-logs', {
+            method: 'POST',
+            headers: { 'X-User-Id': currentUser.id, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, details })
         });
     }
 

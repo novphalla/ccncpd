@@ -1,4 +1,4 @@
-import { json } from '@sveltejs/kit';
+import { json as kitJson } from '@sveltejs/kit';
 import { createClient } from '@supabase/supabase-js';
 import { PUBLIC_SUPABASE_URL } from '$env/static/public';
 import { env } from '$env/dynamic/private';
@@ -20,6 +20,16 @@ function cleanInviteCode(value) {
     return String(value || '').replace(/\D/g, '').slice(0, 4);
 }
 
+function json(body, init = {}) {
+    return kitJson(body, {
+        ...init,
+        headers: {
+            'Cache-Control': 'private, no-store',
+            ...(init.headers || {})
+        }
+    });
+}
+
 async function getUser(supabase, userId) {
     if (!validUuid(userId)) return null;
     const { data } = await supabase
@@ -30,13 +40,24 @@ async function getUser(supabase, userId) {
     return data || null;
 }
 
+function requestHeaderUserId(event) {
+    const userId = event.request.headers.get('X-User-Id');
+    return validUuid(userId) ? userId : null;
+}
+
 async function requireAdmin(event, supabase) {
     const user = await getUser(supabase, await getRequestUserId(event));
     return user && ['admin', 'owner'].includes(user.role) ? user : null;
 }
 
-async function requireUser(event, supabase) {
-    return getUser(supabase, await getRequestUserId(event));
+async function requireUser(event, supabase, { allowClientUserFallback = false } = {}) {
+    const requestUserId = await getRequestUserId(event);
+    const user = await getUser(supabase, requestUserId);
+    if (user || !allowClientUserFallback) return user;
+
+    // Mobile/PWA sessions can keep the app user while losing the signed cookie.
+    // Use this only for member self-service actions, never for admin checks.
+    return getUser(supabase, requestHeaderUserId(event));
 }
 
 function unavailable() {
@@ -69,8 +90,11 @@ export async function GET(event) {
         }
         if (!supabase) return unavailable();
         if (mode === 'unlocks') {
-            const user = await requireUser(event, supabase);
-            if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+            const user = await requireUser(event, supabase, { allowClientUserFallback: true });
+            if (!user) return json({
+                error: 'Authentication session expired',
+                code: 'AUTH_SESSION_REQUIRED'
+            }, { status: 401 });
 
             const { data, error } = await supabase
                 .from('course_invite_redemptions')
@@ -114,8 +138,11 @@ export async function POST(event) {
         }
 
         if (body?.action === 'redeem') {
-            const user = await requireUser(event, supabase);
-            if (!user) return json({ error: 'Unauthorized' }, { status: 401 });
+            const user = await requireUser(event, supabase, { allowClientUserFallback: true });
+            if (!user) return json({
+                error: 'Authentication session expired',
+                code: 'AUTH_SESSION_REQUIRED'
+            }, { status: 401 });
 
             const code = cleanInviteCode(body.code);
             if (code.length !== 4) return json({ error: 'Invalid invite code' }, { status: 400 });

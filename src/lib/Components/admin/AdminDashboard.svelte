@@ -486,6 +486,7 @@
             {supabase} 
             {courses} 
             {loginLogoUrl} 
+            {currentUser}
             on:viewUserProfile={(e) => viewUserProfile(e.detail)} 
         />
     {/if}

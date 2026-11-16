@@ -2,12 +2,31 @@
     import { createEventDispatcher, onMount, tick, onDestroy } from 'svelte';
     import { fade, fly } from 'svelte/transition';
     import { PUBLIC_R2_PUBLIC_URL } from '$env/static/public';
+    import { normalizeAssetProxyUrl } from '$lib/utils.js';
+    import {
+        ArrowLeftIcon,
+        BookOpenIcon,
+        CheckCircle2Icon,
+        ChevronLeftIcon,
+        ChevronRightIcon,
+        CircleAlertIcon,
+        Clock3Icon,
+        DownloadIcon,
+        ExternalLinkIcon,
+        FileQuestionIcon,
+        ListIcon,
+        LoaderCircleIcon,
+        Maximize2Icon,
+        Minimize2Icon,
+        XIcon,
+        ZoomInIcon,
+        ZoomOutIcon
+    } from 'lucide-svelte';
 
     export let course = { title: 'ចំណងជើងវគ្គសិក្សា' };
     export let lesson = { title: 'មេរៀនទី ១', duration: '10:00' };
     export let lessons = [];
     export let currentProgress = 0;
-    export let supabase = null;
     export let currentUser = null;
     
     const dispatch = createEventDispatcher();
@@ -78,11 +97,13 @@
         markComplete();
     }
 
-    $: if (lesson && lesson.url) {
+    $: lessonFileUrl = normalizeAssetProxyUrl(lesson?.url, PUBLIC_R2_PUBLIC_URL);
+
+    $: if (lesson) {
         errorMessage = ''; // Reset error when lesson changes
-        isPdf = lesson.url.toLowerCase().match(/\.pdf(\?.*)?$/);
+        isPdf = !!(lessonFileUrl && lessonFileUrl.toLowerCase().match(/\.pdf(\?.*)?$/));
         if (isPdf) {
-            loadPdf(lesson.url);
+            loadPdf(lessonFileUrl);
         }
     }
 
@@ -169,8 +190,8 @@
         // Auto-fit: fill viewport (one page at a time, book mode)
         if (typeof window !== 'undefined') {
             const unscaledViewport = page.getViewport({ scale: 1 });
-            // Subtract: header(~56) + footer(~52) + sticky bar(~44) + padding(~20)
-            const availH = window.innerHeight - 172;
+            // Reserve room for the header, page toolbar, lesson footer, and viewer padding.
+            const availH = window.innerHeight - 196;
             const availW = Math.min(window.innerWidth - 32, 1200);
             const scaleByH = availH / unscaledViewport.height;
             const scaleByW = availW / unscaledViewport.width;
@@ -261,20 +282,31 @@
     }
 
     async function loadProgress() {
-        if (!supabase || !currentUser || !lesson || lesson.id === 'fallback') {
+        if (!currentUser || !lesson || lesson.id === 'fallback') {
             currentPage = 1;
             return;
         }
-        
-        const { data } = await supabase
-            .from('lesson_progress')
-            .select('last_page, completed')
-            .eq('user_id', currentUser.id)
-            .eq('lesson_id', lesson.id)
-            .maybeSingle();
-            
-        currentPage = data?.last_page || 1;
-        isCompleted = data?.completed || false;
+
+        try {
+            const response = await fetch(`/api/lesson-progress?lesson_id=${encodeURIComponent(lesson.id)}`, {
+                cache: 'no-store',
+                credentials: 'same-origin'
+            });
+
+            if (!response.ok) {
+                console.warn('Unable to load lesson progress:', response.status);
+                currentPage = 1;
+                return;
+            }
+
+            const data = await response.json();
+            currentPage = data.progress?.last_page || 1;
+            isCompleted = data.progress?.completed || false;
+        } catch (error) {
+            console.warn('Unable to load lesson progress:', error);
+            currentPage = 1;
+            return;
+        }
         
         if (currentPage > 1 && !isCompleted) {
             resumeToastMessage = `អ្នកបានរៀនដល់ទំព័រទី ${currentPage} នៃ ${totalPages}`;
@@ -286,34 +318,52 @@
     }
 
     async function saveProgress() {
-        if (!supabase || !currentUser || !lesson || lesson.id === 'fallback') return;
+        if (!currentUser || !lesson || lesson.id === 'fallback') return;
 
-        await supabase
-            .from('lesson_progress')
-            .upsert({
-                user_id: currentUser.id,
-                lesson_id: lesson.id,
-                course_id: course.id,
-                last_page: currentPage,
-                updated_at: new Date()
-            }, { onConflict: 'user_id,lesson_id' });
+        try {
+            const response = await fetch('/api/lesson-progress', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    lesson_id: lesson.id,
+                    course_id: course.id,
+                    last_page: currentPage
+                })
+            });
+
+            if (!response.ok) {
+                console.warn('Unable to save lesson progress:', response.status);
+            }
+        } catch (error) {
+            console.warn('Unable to save lesson progress:', error);
+        }
     }
 
     async function markComplete() {
-        if (!supabase || !currentUser || !lesson || lesson.id === 'fallback') return;
+        if (!currentUser || !lesson || lesson.id === 'fallback') return;
 
-        const { error } = await supabase
-            .from('lesson_progress')
-            .upsert({
-                user_id: currentUser.id,
-                lesson_id: lesson.id,
-                course_id: course.id,
-                last_page: currentPage,
-                completed: true,
-                updated_at: new Date()
-            }, { onConflict: 'user_id,lesson_id' });
-            
-        if (!error) isCompleted = true;
+        try {
+            const response = await fetch('/api/lesson-progress', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    lesson_id: lesson.id,
+                    course_id: course.id,
+                    last_page: currentPage,
+                    completed: true
+                })
+            });
+
+            if (response.ok) {
+                isCompleted = true;
+            } else {
+                console.warn('Unable to mark lesson complete:', response.status);
+            }
+        } catch (error) {
+            console.warn('Unable to mark lesson complete:', error);
+        }
     }
 
     // Auto-hide controls for immersion
@@ -328,13 +378,15 @@
     function toggleFullScreen() {
         if (!document.fullscreenElement) {
             document.documentElement.requestFullscreen();
-            isFullScreen = true;
         } else {
             if (document.exitFullscreen) {
                 document.exitFullscreen();
-                isFullScreen = false;
             }
         }
+    }
+
+    function syncFullscreenState() {
+        isFullScreen = !!document.fullscreenElement;
     }
     
     function handleTouchStart(e) {
@@ -414,13 +466,13 @@
     let isDownloading = false;
 
     $: isYouTube = !!(lesson?.url && lesson.url.match(/youtube|youtu\.be/i));
-    $: canDownload = !!(course?.allow_download && lesson?.url && !isYouTube);
+    $: canDownload = !!(course?.allow_download && lessonFileUrl && !isYouTube);
 
     async function downloadLesson() {
-        if (!lesson?.url || isDownloading) return;
+        if (!lessonFileUrl || isDownloading) return;
         isDownloading = true;
         try {
-            const res = await fetch(lesson.url);
+            const res = await fetch(lessonFileUrl);
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const blob = await res.blob();
             const ext = isPdf ? '.pdf' : '';
@@ -433,7 +485,7 @@
             a.click();
             setTimeout(() => { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 500);
         } catch {
-            window.open(lesson.url, '_blank');
+            window.open(lessonFileUrl, '_blank');
         } finally {
             isDownloading = false;
         }
@@ -447,12 +499,14 @@
 
     onMount(() => {
         handleMouseMove();
+        document.addEventListener('fullscreenchange', syncFullscreenState);
     });
     
     onDestroy(() => {
         clearTimeout(hideControlsTimeout);
         clearTimeout(saveProgressTimeout);
         clearTimeout(resumeToastTimeout);
+        document.removeEventListener('fullscreenchange', syncFullscreenState);
         // Clear Memory ពេលបិទ Component
         if (currentLoadingTask) currentLoadingTask.destroy().catch(()=>{});
         if (pdfDoc) pdfDoc.destroy().catch(()=>{});
@@ -461,280 +515,826 @@
 
 <svelte:window on:keydown={handleKeyDown} on:resize={() => { if (pdfDoc) queueRenderPage(currentPage); }} />
 
-<div class="fixed inset-0 z-50 flex flex-col overflow-hidden"
-     role="region" aria-label="Lesson Player"
-     transition:fade={{ duration: 200 }}
-     on:touchstart={handleTouchStart}
-     on:touchmove={handleTouchMove}
-     on:touchend={handleTouchEnd}
-     style="background:#f0e6d0;">
-
-    <!-- ផ្ទាំងលោតប្រាប់ពីទំព័រដែលបានរៀនដល់ (Resume Toast) -->
+<div
+    class="lesson-shell fixed inset-0 z-50 flex flex-col overflow-hidden"
+    role="region"
+    aria-label="Lesson Player"
+    transition:fade={{ duration: 180 }}
+    on:touchstart={handleTouchStart}
+    on:touchmove={handleTouchMove}
+    on:touchend={handleTouchEnd}
+>
     {#if resumeToastMessage}
-        <div class="absolute top-16 left-1/2 transform -translate-x-1/2 z-[60] px-5 py-2.5 rounded-full shadow-2xl text-sm font-bold flex items-center gap-2 whitespace-nowrap"
-             transition:fly={{ y: -20, duration: 400 }}
-             style="background: #2c1a0e; color: #c8a96e; border: 1px solid #b8860b;">
-            <span class="text-lg">🔖</span> {resumeToastMessage}
+        <div
+            class="resume-toast absolute left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 whitespace-nowrap px-4 py-2.5 text-sm font-bold shadow-xl"
+            transition:fly={{ y: -16, duration: 300 }}
+        >
+            <BookOpenIcon size={18} />
+            {resumeToastMessage}
         </div>
     {/if}
-    
-    <!-- ═══ HEADER ═══ -->
-    <header class="flex-shrink-0 flex items-center gap-2 px-3 sm:px-5 py-3 z-20"
-            style="background:linear-gradient(180deg,#2a1a09,#3c2414); border-bottom:2px solid #b8860b; box-shadow:0 4px 20px rgba(0,0,0,.4);">
 
-        <button on:click={() => dispatch('close')}
-                class="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center"
-                style="color:#c8a96e; background:rgba(255,255,255,.06); border:none; cursor:pointer;">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" width="18" height="18">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/>
-            </svg>
-        </button>
+    <header class="lesson-header relative z-20 flex-shrink-0">
+        <div class="flex min-h-[64px] items-center gap-2 px-2.5 sm:gap-3 sm:px-5">
+            <button
+                on:click={() => dispatch('close')}
+                class="reader-icon-button flex-shrink-0"
+                aria-label="ត្រឡប់ក្រោយ"
+                title="ត្រឡប់ក្រោយ"
+            >
+                <ArrowLeftIcon size={20} strokeWidth={2.25} />
+            </button>
 
-        <div class="flex-1 min-w-0">
-            <p class="truncate" style="color:#b8a070; font-size:.6rem; letter-spacing:.12em; text-transform:uppercase; font-family:sans-serif; line-height:1.2;">{course.title}</p>
-            <h1 class="truncate font-bold" style="color:#f5ede0; font-size:.88rem; line-height:1.3;">{lesson.title}</h1>
-        </div>
-
-        <div class="hidden sm:flex items-center gap-2 flex-shrink-0" style="font-family:monospace; color:#c8a96e; font-size:.7rem;">
-            <div class="rounded-full overflow-hidden" style="width:72px; height:4px; background:#4a2c18;">
-                <div class="h-full rounded-full transition-all duration-500" style="width:{currentProgress}%; background:linear-gradient(90deg,#b8860b,#daa520);"></div>
+            <div class="min-w-0 flex-1">
+                <p class="course-title truncate">{course.title}</p>
+                <h1 class="lesson-title truncate">{lesson.title}</h1>
             </div>
-            <span>{currentProgress}%</span>
+
+            <div class="hidden min-w-[116px] items-center gap-2 md:flex">
+                <div class="progress-track flex-1">
+                    <div class="progress-value" style="width:{currentProgress}%"></div>
+                </div>
+                <span class="progress-label">{currentProgress}%</span>
+            </div>
+
+            <div class="header-actions flex flex-shrink-0 items-center gap-1">
+                <button
+                    on:click={() => showToc = !showToc}
+                    class:reader-icon-button-active={showToc}
+                    class="reader-icon-button"
+                    aria-label="បញ្ជីមាតិកា"
+                    aria-pressed={showToc}
+                    title="បញ្ជីមាតិកា"
+                >
+                    <ListIcon size={19} />
+                </button>
+
+                <button
+                    on:click={toggleFullScreen}
+                    class="reader-icon-button hidden sm:flex"
+                    aria-label={isFullScreen ? 'ចាកចេញពីពេញអេក្រង់' : 'ពេញអេក្រង់'}
+                    title={isFullScreen ? 'ចាកចេញពីពេញអេក្រង់' : 'ពេញអេក្រង់'}
+                >
+                    {#if isFullScreen}
+                        <Minimize2Icon size={18} />
+                    {:else}
+                        <Maximize2Icon size={18} />
+                    {/if}
+                </button>
+
+                {#if canDownload}
+                    <button
+                        on:click={downloadLesson}
+                        class="download-button"
+                        disabled={isDownloading}
+                        aria-label="ទាញយកមេរៀន"
+                        title="ទាញយកមេរៀន"
+                    >
+                        {#if isDownloading}
+                            <LoaderCircleIcon class="animate-spin" size={19} />
+                        {:else}
+                            <DownloadIcon size={19} />
+                        {/if}
+                    </button>
+                {/if}
+            </div>
         </div>
 
-        <button on:click={() => showToc = !showToc}
-                class="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center transition-all"
-                style="color:{showToc?'#2a1a09':'#c8a96e'}; background:{showToc?'#c8a96e':'rgba(255,255,255,.06)'}; border:none; cursor:pointer;"
-                title="បញ្ជីមាតិកា">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="18" height="18">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12"/>
-            </svg>
-        </button>
-
-        <button on:click={toggleFullScreen}
-                class="flex-shrink-0 w-9 h-9 rounded-full hidden sm:flex items-center justify-center"
-                style="color:#c8a96e; background:rgba(255,255,255,.06); border:none; cursor:pointer;"
-                title="ពេញអេក្រង់">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="18" height="18">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15"/>
-            </svg>
-        </button>
-
-        {#if canDownload}
-        <button on:click={downloadLesson}
-                class="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center"
-                style="color:#c8a96e; background:rgba(255,255,255,.06); border:none; cursor:pointer; opacity:{isDownloading ? 0.5 : 1};"
-                disabled={isDownloading}
-                title="ទាញយក">
-            {#if isDownloading}
-                <div class="animate-spin rounded-full" style="width:16px; height:16px; border:2px solid #c8a96e; border-top-color:transparent;"></div>
-            {:else}
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="18" height="18">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/>
-                </svg>
-            {/if}
-        </button>
-        {/if}
+        <div class="mobile-progress md:hidden">
+            <div class="progress-value" style="width:{currentProgress}%"></div>
+        </div>
     </header>
 
-    <!-- ═══ BODY ═══ -->
-    <div class="flex-1 flex overflow-hidden relative">
-
+    <div class="relative flex flex-1 overflow-hidden">
         {#if showToc && lessons.length > 0}
-            <!-- Mobile backdrop -->
-            <div class="fixed inset-0 z-10 sm:hidden" style="background:rgba(0,0,0,.6);" on:click={() => showToc=false} role="presentation"></div>
+            <button
+                class="toc-backdrop absolute inset-0 z-20 sm:hidden"
+                on:click={() => showToc = false}
+                aria-label="បិទបញ្ជីមាតិកា"
+            ></button>
 
-            <aside class="w-64 sm:w-72 flex-shrink-0 flex flex-col overflow-hidden z-20"
-                   style="background:#1e110a; border-right:2px solid #4a2c18;"
-                   transition:fly={{ x: -20, duration: 180 }}>
-                <div class="flex items-center justify-between px-4 py-3 flex-shrink-0"
-                     style="border-bottom:1px solid #3a2414;">
-                    <span style="color:#b8860b; font-size:.68rem; letter-spacing:.15em; text-transform:uppercase; font-family:sans-serif; font-weight:700;">📚 បញ្ជីមាតិកា</span>
-                    <button class="sm:hidden w-7 h-7 flex items-center justify-center rounded-full"
-                            style="color:#c8a96e; background:rgba(255,255,255,.06); border:none; cursor:pointer; font-size:.85rem;"
-                            on:click={() => showToc=false}>✕</button>
-                </div>
-                <nav class="overflow-y-auto flex-1 py-1">
-                    {#each lessons as l, i}
-                    <button class="w-full text-left flex items-start gap-3 px-4 py-3 transition-colors"
-                            style="background:{l.id===lesson.id?'rgba(184,134,11,.15)':'transparent'}; border-left:3px solid {l.id===lesson.id?'#b8860b':'transparent'}; border-bottom:1px solid #2c1a0e; border-top:none; border-right:none; cursor:pointer;"
-                            on:click={() => { lesson=l; resetState(); if(typeof window!=='undefined'&&window.innerWidth<640) showToc=false; }}>
-                        <span style="color:#b8860b; font-size:.62rem; font-family:monospace; flex-shrink:0; margin-top:3px; font-weight:700;">{String(i+1).padStart(2,'0')}</span>
-                        <span class="text-sm leading-snug" style="color:{l.id===lesson.id?'#f5ede0':'#a08060'};">{l.title}</span>
+            <aside
+                class="toc-panel absolute inset-y-0 left-0 z-30 flex w-[min(84vw,320px)] flex-shrink-0 flex-col overflow-hidden sm:relative sm:w-80"
+                transition:fly={{ x: -24, duration: 180 }}
+            >
+                <div class="toc-header flex flex-shrink-0 items-center justify-between px-4 py-3.5">
+                    <div class="flex min-w-0 items-center gap-2">
+                        <BookOpenIcon size={18} />
+                        <div class="min-w-0">
+                            <h2>មាតិកាវគ្គសិក្សា</h2>
+                            <p>{lessons.length} មេរៀន</p>
+                        </div>
+                    </div>
+                    <button
+                        class="reader-icon-button sm:hidden"
+                        on:click={() => showToc = false}
+                        aria-label="បិទបញ្ជីមាតិកា"
+                        title="បិទ"
+                    >
+                        <XIcon size={18} />
                     </button>
+                </div>
+
+                <nav class="toc-list flex-1 overflow-y-auto p-2" aria-label="បញ្ជីមេរៀន">
+                    {#each lessons as l, i}
+                        <button
+                            class:toc-item-active={l.id === lesson.id}
+                            class="toc-item flex w-full items-start gap-3 text-left"
+                            aria-current={l.id === lesson.id ? 'page' : undefined}
+                            on:click={() => {
+                                lesson = l;
+                                resetState();
+                                if (typeof window !== 'undefined' && window.innerWidth < 640) showToc = false;
+                            }}
+                        >
+                            <span class="toc-number">{String(i + 1).padStart(2, '0')}</span>
+                            <span class="min-w-0 flex-1">
+                                <span class="toc-item-title">{l.title}</span>
+                                {#if l.duration}
+                                    <span class="toc-duration">
+                                        <Clock3Icon size={12} />
+                                        {l.duration}
+                                    </span>
+                                {/if}
+                            </span>
+                        </button>
                     {/each}
                 </nav>
             </aside>
         {/if}
 
-        <!-- Reading area -->
-        <main class="flex-1 flex flex-col overflow-hidden"
-              on:mousemove={handleMouseMove}>
-
-            <!-- Scrollable content: centered + no-scroll for PDF, normal scroll for video -->
-            <div class="flex-1 flex {isPdf ? 'items-center justify-center overflow-hidden p-2' : 'flex-col items-center overflow-auto py-5 px-3 sm:px-6'}"
-                 style="background:#f0e6d0; background-image:radial-gradient(circle at 20% 80%,rgba(184,134,11,.04) 0%,transparent 60%),radial-gradient(circle at 80% 20%,rgba(92,59,30,.05) 0%,transparent 60%);">
-
-            <!-- Ornamental chapter heading (video only) -->
-            {#if !isPdf}
-            <p class="mb-4 select-none tracking-widest text-center" style="color:#a08060; font-size:.6rem; letter-spacing:.2em; font-family:sans-serif; text-transform:uppercase; opacity:.7;">❦ &nbsp;{lesson.title}&nbsp; ❦</p>
-            {/if}
-
-            <!-- Book with drop shadow -->
-            <div style="{isPdf ? '' : 'overflow-x:auto;'} max-width:100%;">
-                <div class="relative"
-                     style="background:white; border-radius:2px; box-shadow:0 2px 8px rgba(44,26,14,.15),0 8px 30px rgba(44,26,14,.25),0 20px 60px rgba(44,26,14,.18),-4px 0 12px rgba(0,0,0,.08); display:inline-block; overflow:hidden; perspective:1200px;">
-
-                    <!-- Spine shadow -->
-                    <div class="absolute left-0 top-0 bottom-0 z-10 pointer-events-none" style="width:18px; background:linear-gradient(to right,rgba(44,26,14,.22) 0%,rgba(44,26,14,.06) 55%,transparent 100%);"></div>
-
-                    <!-- Exit page overlay (book flip-out animation) -->
+        <main class="flex min-w-0 flex-1 flex-col overflow-hidden" on:mousemove={handleMouseMove}>
+            <div
+                class:pdf-viewport={isPdf}
+                class:media-viewport={!isPdf}
+                class="reader-viewport flex-1"
+            >
+                <div class:pdf-document={isPdf} class:media-document={!isPdf} class="document-surface relative">
                     {#if pageExitState}
-                    <img src={pageExitState.src} alt=""
-                         class="absolute top-0 left-0 pointer-events-none"
-                         style="width:{pageExitState.w}px; height:{pageExitState.h}px; z-index:8; display:block;
-                                animation: {pageExitState.dir > 0 ? 'bookExitLeft' : 'bookExitRight'} 0.38s ease-in forwards;" />
+                        <img
+                            src={pageExitState.src}
+                            alt=""
+                            class="pointer-events-none absolute left-0 top-0"
+                            style="width:{pageExitState.w}px; height:{pageExitState.h}px; z-index:8; display:block;
+                                   animation:{pageExitState.dir > 0 ? 'bookExitLeft' : 'bookExitRight'} 0.38s ease-in forwards;"
+                        />
                     {/if}
 
-                    <!-- PDF Canvas -->
-                    <canvas bind:this={canvas} style="display:block;"></canvas>
+                    <canvas bind:this={canvas} class:hidden={!isPdf} class="pdf-canvas"></canvas>
 
-                    <!-- Video iframe -->
-                    {#if !isPdf && lesson.url}
-                    <div class="w-full max-w-4xl mx-auto aspect-video bg-black/90 rounded-lg overflow-hidden shadow-inner flex items-center justify-center">
-                        <iframe src={getEmbedUrl(lesson.url)}
+                    {#if !isPdf && lessonFileUrl}
+                        <div class="video-frame">
+                            <iframe
+                                src={getEmbedUrl(lessonFileUrl)}
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                allowfullscreen title={lesson.title} loading="lazy"
-                                style="width:100%; height:100%; border:none; display:block;"></iframe>
-                    </div>
+                                allowfullscreen
+                                title={lesson.title}
+                                loading="lazy"
+                            ></iframe>
+                        </div>
                     {/if}
 
-                    <!-- Error -->
                     {#if errorMessage}
-                    <div class="absolute inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center z-20"
-                         style="background:rgba(253,246,227,.96);">
-                        <span style="font-size:2.5rem;">⚠️</span>
-                        <p class="text-sm" style="color:#5c3b1e; max-width:320px; line-height:1.7;">{errorMessage}</p>
-                        <a href={lesson.url} target="_blank" rel="noopener noreferrer"
-                           class="text-sm font-bold px-5 py-2 rounded"
-                           style="background:#2c1a0e; color:#c8a96e; text-decoration:none; display:inline-block;">
-                            បើកផ្ទាល់ →
-                        </a>
-                    </div>
+                        <div class="reader-state absolute inset-0 z-20">
+                            <span class="state-icon state-icon-error">
+                                <CircleAlertIcon size={26} />
+                            </span>
+                            <p>{errorMessage}</p>
+                            <a href={lessonFileUrl} target="_blank" rel="noopener noreferrer" class="state-action">
+                                <ExternalLinkIcon size={16} />
+                                បើកផ្ទាល់
+                            </a>
+                        </div>
                     {/if}
 
-                    <!-- Loading -->
                     {#if isPdf && !pdfDoc && !errorMessage}
-                    <div class="flex flex-col items-center justify-center gap-4"
-                         style="min-height:320px; background:#fdf6e3;">
-                        <div class="animate-spin rounded-full"
-                             style="width:32px; height:32px; border:2px solid #b8860b; border-top-color:transparent;"></div>
-                        <p style="color:#8b6540; font-family:sans-serif; font-size:.78rem;">
-                            កំពុងផ្ទុកឯកសារ... {#if downloadProgress > 0 && downloadProgress < 100}{downloadProgress}%{/if}
-                        </p>
-                    </div>
+                        <div class="reader-state loading-state">
+                            <LoaderCircleIcon class="animate-spin text-teal-600" size={30} />
+                            <p>
+                                កំពុងផ្ទុកឯកសារ
+                                {#if downloadProgress > 0 && downloadProgress < 100}
+                                    <strong>{downloadProgress}%</strong>
+                                {/if}
+                            </p>
+                        </div>
                     {/if}
 
-                    <!-- No URL -->
-                    {#if !lesson.url && !errorMessage}
-                    <div class="flex flex-col items-center justify-center" style="min-height:400px; min-width:260px;">
-                        <span style="font-size:4rem; opacity:.2;">📖</span>
-                        <p style="color:#c8b08a; font-family:sans-serif; font-size:.85rem; margin-top:.5rem; opacity:.6;">មិនមានមាតិការ</p>
-                    </div>
+                    {#if !lessonFileUrl && !errorMessage}
+                        <div class="reader-state empty-state">
+                            <span class="state-icon">
+                                <FileQuestionIcon size={28} />
+                            </span>
+                            <p>មិនមានមាតិកា</p>
+                        </div>
                     {/if}
-
-                    <!-- Corner fold -->
-                    <div class="absolute bottom-0 right-0 pointer-events-none z-10"
-                         style="width:22px; height:22px; background:linear-gradient(225deg,#f0e6d0 50%,rgba(200,170,110,.25) 50%);"></div>
                 </div>
+
+                {#if !isPdf && lessonFileUrl && !isCompleted && !errorMessage}
+                    <button on:click={markComplete} class="complete-button" in:fade={{ duration: 250, delay: 300 }}>
+                        <CheckCircle2Icon size={19} />
+                        បញ្ជាក់ថាបានរៀនចប់
+                    </button>
+                {/if}
             </div>
 
-            <!-- Manual Complete Button for Videos/Images -->
-            {#if !isPdf && lesson.url && !isCompleted && !errorMessage}
-            <div class="mt-8 flex justify-center w-full" in:fade={{ duration: 300, delay: 500 }}>
-                <button on:click={markComplete} class="px-8 py-3 rounded-full font-bold shadow-lg transition-transform hover:scale-105 active:scale-95 flex items-center gap-2" 
-                        style="background:linear-gradient(90deg,#b8860b,#daa520); color:#2a1a09; border:none; text-shadow: 0 1px 1px rgba(255,255,255,0.3);">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg> បញ្ជាក់ថាបានរៀនចប់
-                </button>
-            </div>
-            {/if}
-
-            </div><!-- end scrollable -->
-
-            <!-- Sticky page controls bar (always visible, no scroll needed) -->
             {#if isPdf && pdfDoc}
-            <div class="flex-shrink-0 flex items-center justify-between gap-2 px-4 py-2.5"
-                 style="background:rgba(42,26,9,0.96); border-top:1px solid rgba(184,134,11,0.35); backdrop-filter:blur(4px);">
-
-                <div class="flex items-center gap-1.5">
-                    <button on:click={zoomOut}
-                            class="flex items-center justify-center rounded font-bold"
-                            style="width:28px;height:28px;background:rgba(200,169,110,.1);color:#c8a96e;border:1px solid rgba(184,134,11,.3);cursor:pointer;font-size:1rem;">−</button>
-                    <span style="color:#8b7050;font-family:monospace;font-size:.7rem;min-width:32px;text-align:center;">{zoom}%</span>
-                    <button on:click={zoomIn}
-                            class="flex items-center justify-center rounded font-bold"
-                            style="width:28px;height:28px;background:rgba(200,169,110,.1);color:#c8a96e;border:1px solid rgba(184,134,11,.3);cursor:pointer;font-size:1rem;">+</button>
-                </div>
-
-                <div class="flex items-center gap-2">
-                    <button disabled={currentPage===1} on:click={() => changePage(-1)}
-                            class="flex items-center justify-center rounded-full font-bold text-xl disabled:opacity-25"
-                            style="width:36px;height:36px;background:#b8860b;color:#2a1a09;border:none;cursor:pointer;line-height:1;">‹</button>
-
-                    <div class="flex items-center gap-1 rounded-full px-3 py-1"
-                         style="background:rgba(255,255,255,.07);min-width:72px;justify-content:center;">
-                        <span class="font-bold" style="color:#f5ede0;font-family:monospace;font-size:.9rem;">{currentPage}</span>
-                        <span style="color:#6b4c30;font-size:.75rem;margin:0 2px;">/</span>
-                        <span style="color:#b8a070;font-family:monospace;font-size:.85rem;">{totalPages}</span>
+                <div class="page-toolbar flex flex-shrink-0 items-center justify-between gap-2 px-2.5 sm:px-4">
+                    <div class="zoom-controls flex items-center gap-1">
+                        <button on:click={zoomOut} class="toolbar-icon-button" aria-label="បន្ថយទំហំ" title="បន្ថយទំហំ">
+                            <ZoomOutIcon size={17} />
+                        </button>
+                        <span class="zoom-value">{zoom}%</span>
+                        <button on:click={zoomIn} class="toolbar-icon-button" aria-label="ពង្រីកទំហំ" title="ពង្រីកទំហំ">
+                            <ZoomInIcon size={17} />
+                        </button>
                     </div>
 
-                    <button disabled={currentPage===totalPages} on:click={() => changePage(1)}
-                            class="flex items-center justify-center rounded-full font-bold text-xl disabled:opacity-25"
-                            style="width:36px;height:36px;background:#b8860b;color:#2a1a09;border:none;cursor:pointer;line-height:1;">›</button>
-                </div>
+                    <div class="page-controls flex items-center gap-1.5">
+                        <button
+                            disabled={currentPage === 1}
+                            on:click={() => changePage(-1)}
+                            class="page-nav-button"
+                            aria-label="ទំព័រមុន"
+                            title="ទំព័រមុន"
+                        >
+                            <ChevronLeftIcon size={20} />
+                        </button>
 
-                <span class="text-xs" style="color:#6b4c30;font-family:sans-serif;opacity:.6;font-size:.62rem;">← → keys</span>
-            </div>
+                        <div class="page-counter" aria-label={`ទំព័រ ${currentPage} នៃ ${totalPages}`}>
+                            <strong>{currentPage}</strong>
+                            <span>/</span>
+                            <span>{totalPages}</span>
+                        </div>
+
+                        <button
+                            disabled={currentPage === totalPages}
+                            on:click={() => changePage(1)}
+                            class="page-nav-button"
+                            aria-label="ទំព័របន្ទាប់"
+                            title="ទំព័របន្ទាប់"
+                        >
+                            <ChevronRightIcon size={20} />
+                        </button>
+                    </div>
+
+                    <div class="hidden w-[104px] sm:block"></div>
+                </div>
             {/if}
         </main>
     </div>
 
-    <!-- ═══ FOOTER ═══ -->
-    <footer class="flex-shrink-0 flex items-center gap-3 px-4 py-3 z-20"
-            style="background:linear-gradient(180deg,#3c2414,#2a1a09); border-top:2px solid #b8860b; box-shadow:0 -4px 20px rgba(0,0,0,.35);">
-
-        <button disabled={!hasPrev} on:click={prevLesson}
-                class="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium transition-opacity disabled:opacity-30"
-                style="background:rgba(184,134,11,.12); color:#c8a96e; border:1px solid rgba(184,134,11,.3); cursor:pointer;">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" width="14" height="14">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/>
-            </svg>
-            <span class="hidden sm:inline">មុន</span>
+    <footer class="lesson-footer relative z-20 flex flex-shrink-0 items-center gap-2 px-2.5 sm:px-4">
+        <button disabled={!hasPrev} on:click={prevLesson} class="lesson-nav-button">
+            <ChevronLeftIcon size={18} />
+            <span class="hidden sm:inline">មេរៀនមុន</span>
         </button>
 
-        <div class="flex-1 flex justify-center">
+        <div class="flex min-w-0 flex-1 justify-center">
             {#if isCompleted}
-            <span class="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-full"
-                  style="background:rgba(34,197,94,.15); color:#86efac; border:1px solid rgba(34,197,94,.25);">
-                ✓ រៀនចប់ហើយ
-            </span>
+                <span class="lesson-status lesson-status-complete">
+                    <CheckCircle2Icon size={16} />
+                    រៀនចប់ហើយ
+                </span>
             {:else if lesson.duration}
-            <span class="text-xs select-none" style="color:#8b6540; letter-spacing:.08em; font-family:sans-serif;">⏱ {lesson.duration}</span>
+                <span class="lesson-status">
+                    <Clock3Icon size={15} />
+                    {lesson.duration}
+                </span>
+            {:else}
+                <span class="lesson-position">{Math.max(currentIndex + 1, 1)} / {Math.max(lessons.length, 1)}</span>
             {/if}
         </div>
 
-        <button disabled={!hasNext} on:click={nextLesson}
-                class="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium transition-opacity disabled:opacity-30"
-                style="background:rgba(184,134,11,.12); color:#c8a96e; border:1px solid rgba(184,134,11,.3); cursor:pointer;">
-            <span class="hidden sm:inline">បន្ទាប់</span>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" width="14" height="14">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/>
-            </svg>
+        <button disabled={!hasNext} on:click={nextLesson} class="lesson-nav-button lesson-nav-button-next">
+            <span class="hidden sm:inline">មេរៀនបន្ទាប់</span>
+            <ChevronRightIcon size={18} />
         </button>
     </footer>
 </div>
 
 <style>
+    .lesson-shell {
+        background: #e7edf2;
+        color: #17212b;
+    }
+
+    .lesson-header {
+        background: #ffffff;
+        border-bottom: 1px solid #d7e0e8;
+        box-shadow: 0 2px 12px rgba(20, 35, 50, 0.08);
+    }
+
+    .reader-icon-button,
+    .download-button,
+    .toolbar-icon-button,
+    .page-nav-button {
+        display: flex;
+        width: 40px;
+        height: 40px;
+        flex: 0 0 40px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        border: 1px solid #d7e0e8;
+        background: #f8fafc;
+        color: #405265;
+        cursor: pointer;
+        transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+    }
+
+    .reader-icon-button:hover,
+    .toolbar-icon-button:hover,
+    .page-nav-button:hover:not(:disabled) {
+        border-color: #aebdca;
+        background: #eef3f6;
+        color: #17212b;
+    }
+
+    .reader-icon-button-active {
+        border-color: #0f766e;
+        background: #e6f5f3;
+        color: #0f766e;
+    }
+
+    .download-button {
+        border-color: #0f766e;
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .download-button:hover:not(:disabled) {
+        border-color: #0b5f59;
+        background: #0b5f59;
+    }
+
+    .download-button:disabled,
+    .reader-icon-button:disabled,
+    .toolbar-icon-button:disabled,
+    .page-nav-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+    }
+
+    .reader-icon-button:focus-visible,
+    .download-button:focus-visible,
+    .toolbar-icon-button:focus-visible,
+    .page-nav-button:focus-visible,
+    .toc-item:focus-visible,
+    .lesson-nav-button:focus-visible,
+    .complete-button:focus-visible {
+        outline: 3px solid rgba(14, 165, 164, 0.28);
+        outline-offset: 2px;
+    }
+
+    .course-title {
+        color: #6a7b8c;
+        font-size: 0.68rem;
+        line-height: 1.35;
+        letter-spacing: 0;
+    }
+
+    .lesson-title {
+        margin-top: 2px;
+        color: #17212b;
+        font-size: 0.95rem;
+        line-height: 1.4;
+        letter-spacing: 0;
+    }
+
+    .progress-track,
+    .mobile-progress {
+        overflow: hidden;
+        background: #dfe7ed;
+    }
+
+    .progress-track {
+        height: 6px;
+        border-radius: 3px;
+    }
+
+    .mobile-progress {
+        height: 3px;
+    }
+
+    .progress-value {
+        height: 100%;
+        border-radius: inherit;
+        background: #0f8f83;
+        transition: width 300ms ease;
+    }
+
+    .progress-label {
+        min-width: 34px;
+        color: #516273;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.72rem;
+        text-align: right;
+    }
+
+    .resume-toast {
+        top: 76px;
+        max-width: calc(100vw - 24px);
+        overflow: hidden;
+        border: 1px solid #b7e3de;
+        border-radius: 6px;
+        background: #ffffff;
+        color: #0f766e;
+        text-overflow: ellipsis;
+    }
+
+    .toc-backdrop {
+        border: 0;
+        background: rgba(15, 23, 32, 0.54);
+    }
+
+    .toc-panel {
+        background: #f8fafc;
+        border-right: 1px solid #d5dfe7;
+        box-shadow: 12px 0 28px rgba(22, 36, 50, 0.12);
+    }
+
+    .toc-header {
+        min-height: 64px;
+        border-bottom: 1px solid #dce4eb;
+        background: #ffffff;
+        color: #0f766e;
+    }
+
+    .toc-header h2 {
+        margin: 0;
+        color: #23313f;
+        font-size: 0.9rem;
+        font-weight: 800;
+        line-height: 1.4;
+        letter-spacing: 0;
+    }
+
+    .toc-header p {
+        margin: 1px 0 0;
+        color: #728293;
+        font-size: 0.68rem;
+        line-height: 1.3;
+    }
+
+    .toc-list {
+        scrollbar-color: #b8c5d0 transparent;
+        scrollbar-width: thin;
+    }
+
+    .toc-item {
+        min-height: 64px;
+        padding: 10px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: #435465;
+        cursor: pointer;
+        transition: background-color 140ms ease, border-color 140ms ease;
+    }
+
+    .toc-item:hover {
+        background: #eef3f6;
+    }
+
+    .toc-item-active {
+        border-color: #a9d9d4;
+        background: #e6f5f3;
+        color: #154f4a;
+    }
+
+    .toc-number {
+        display: flex;
+        width: 30px;
+        height: 30px;
+        flex: 0 0 30px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 5px;
+        background: #e7edf2;
+        color: #667789;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.68rem;
+        font-weight: 700;
+    }
+
+    .toc-item-active .toc-number {
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .toc-item-title {
+        display: -webkit-box;
+        overflow: hidden;
+        color: inherit;
+        font-size: 0.82rem;
+        font-weight: 700;
+        line-height: 1.55;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+    }
+
+    .toc-duration {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-top: 4px;
+        color: #7c8c9b;
+        font-size: 0.66rem;
+    }
+
+    .reader-viewport {
+        min-width: 0;
+        background: #dfe6ec;
+    }
+
+    .pdf-viewport {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        padding: 12px;
+    }
+
+    .media-viewport {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        overflow: auto;
+        padding: 24px 16px;
+    }
+
+    .document-surface {
+        max-width: 100%;
+    }
+
+    .pdf-document {
+        display: inline-block;
+        min-width: 280px;
+        min-height: 320px;
+        overflow: hidden;
+        border: 1px solid #cbd5de;
+        border-radius: 3px;
+        background: #ffffff;
+        box-shadow: 0 3px 10px rgba(31, 46, 61, 0.12), 0 18px 42px rgba(31, 46, 61, 0.16);
+        perspective: 1200px;
+    }
+
+    .media-document {
+        width: min(100%, 1100px);
+    }
+
+    .pdf-canvas {
+        display: block;
+    }
+
+    .video-frame {
+        width: 100%;
+        overflow: hidden;
+        border: 1px solid #283746;
+        border-radius: 6px;
+        aspect-ratio: 16 / 9;
+        background: #101820;
+        box-shadow: 0 12px 32px rgba(31, 46, 61, 0.18);
+    }
+
+    .video-frame iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+    }
+
+    .reader-state {
+        display: flex;
+        min-width: 278px;
+        min-height: 318px;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        padding: 24px;
+        background: rgba(255, 255, 255, 0.98);
+        color: #526273;
+        text-align: center;
+    }
+
+    .reader-state p {
+        max-width: 380px;
+        margin: 0;
+        font-size: 0.84rem;
+        line-height: 1.7;
+    }
+
+    .state-icon {
+        display: flex;
+        width: 52px;
+        height: 52px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        background: #edf2f5;
+        color: #687989;
+    }
+
+    .state-icon-error {
+        background: #fff1f0;
+        color: #c33d36;
+    }
+
+    .state-action,
+    .complete-button {
+        display: inline-flex;
+        min-height: 40px;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 8px 14px;
+        border: 1px solid #0f766e;
+        border-radius: 6px;
+        background: #0f766e;
+        color: #ffffff;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+    }
+
+    .complete-button {
+        flex: 0 0 auto;
+        margin-top: 4px;
+    }
+
+    .page-toolbar {
+        min-height: 52px;
+        border-top: 1px solid #d6e0e7;
+        background: #ffffff;
+        box-shadow: 0 -2px 10px rgba(25, 40, 55, 0.06);
+    }
+
+    .toolbar-icon-button {
+        width: 32px;
+        height: 32px;
+        flex-basis: 32px;
+        border-radius: 5px;
+    }
+
+    .zoom-value {
+        min-width: 38px;
+        color: #536475;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.7rem;
+        text-align: center;
+    }
+
+    .page-nav-button {
+        width: 36px;
+        height: 36px;
+        flex-basis: 36px;
+        border-color: #0f766e;
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .page-nav-button:hover:not(:disabled) {
+        border-color: #0b5f59;
+        background: #0b5f59;
+        color: #ffffff;
+    }
+
+    .page-nav-button:disabled {
+        border-color: #d8e0e6;
+        background: #edf1f4;
+        color: #9ba8b4;
+    }
+
+    .page-counter {
+        display: flex;
+        min-width: 78px;
+        height: 36px;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        border: 1px solid #d8e0e7;
+        border-radius: 6px;
+        background: #f6f8fa;
+        color: #788795;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.78rem;
+    }
+
+    .page-counter strong {
+        color: #17212b;
+        font-size: 0.88rem;
+    }
+
+    .lesson-footer {
+        min-height: 56px;
+        border-top: 1px solid #263746;
+        background: #18242f;
+        box-shadow: 0 -2px 12px rgba(14, 25, 35, 0.12);
+    }
+
+    .lesson-nav-button {
+        display: flex;
+        min-width: 42px;
+        min-height: 38px;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 7px 10px;
+        border: 1px solid #40515f;
+        border-radius: 6px;
+        background: #22313d;
+        color: #e1e9ef;
+        font-size: 0.78rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: background-color 140ms ease, border-color 140ms ease;
+    }
+
+    .lesson-nav-button-next {
+        border-color: #168d82;
+        background: #0f766e;
+        color: #ffffff;
+    }
+
+    .lesson-nav-button:hover:not(:disabled) {
+        border-color: #607483;
+        background: #2c3d4a;
+    }
+
+    .lesson-nav-button-next:hover:not(:disabled) {
+        border-color: #20a598;
+        background: #0b655e;
+    }
+
+    .lesson-nav-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.34;
+    }
+
+    .lesson-status {
+        display: inline-flex;
+        max-width: 100%;
+        min-height: 30px;
+        align-items: center;
+        gap: 6px;
+        overflow: hidden;
+        padding: 5px 10px;
+        color: #aebbc5;
+        font-size: 0.72rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .lesson-status-complete {
+        border: 1px solid rgba(74, 222, 128, 0.28);
+        border-radius: 6px;
+        background: rgba(34, 197, 94, 0.12);
+        color: #86efac;
+        font-weight: 700;
+    }
+
+    .lesson-position {
+        color: #91a0ac;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.72rem;
+    }
+
+    @media (max-width: 420px) {
+        .reader-icon-button,
+        .download-button {
+            width: 38px;
+            height: 38px;
+            flex-basis: 38px;
+        }
+
+        .course-title {
+            font-size: 0.62rem;
+        }
+
+        .lesson-title {
+            font-size: 0.82rem;
+        }
+
+        .pdf-viewport {
+            padding: 8px;
+        }
+
+        .zoom-controls {
+            gap: 0;
+        }
+
+        .zoom-value {
+            min-width: 34px;
+        }
+
+        .page-counter {
+            min-width: 68px;
+        }
+    }
+
     @keyframes bookExitLeft {
         0%   { transform: perspective(1200px) rotateY(0deg) translateX(0)    scale(1);    opacity: 1; transform-origin: left center; }
         40%  { opacity: 0.8; }

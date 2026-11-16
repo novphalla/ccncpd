@@ -54,40 +54,27 @@
             hasMore = true;
         }
         
-        let query = supabase
-            .from('admin_logs')
-            .select('*, users!inner(full_name, name_latin, role)')
-            
-        // បើអ្នកប្រើជា Admin ធម្មតា គឺមិនអាចទាញយក Log ដែលធ្វើឡើងដោយ Owner បានទេ
-        if (currentUser.role !== 'owner') query = query.neq('users.role', 'owner');
-            
-        // បន្ថែមលក្ខខណ្ឌស្វែងរកឈ្មោះ ឬឈ្មោះឡាតាំង
-        if (searchQuery.trim()) {
-            const safeSearch = searchQuery.trim().replace(/,/g, ' '); // ការពារ Error ពេលមានសញ្ញាក្បៀស
-            query = query.or(`full_name.ilike.%${safeSearch}%,name_latin.ilike.%${safeSearch}%`, { foreignTable: 'users' });
-        }
+        const params = new URLSearchParams({
+            page: String(page),
+            pageSize: String(pageSize)
+        });
+        if (searchQuery.trim()) params.set('search', searchQuery.trim());
+        if (startDate) params.set('startDate', startDate);
+        if (endDate) params.set('endDate', endDate);
 
-        // បន្ថែមលក្ខខណ្ឌចម្រោះតាមកាលបរិច្ឆេទ
-        if (startDate) {
-            const start = new Date(`${startDate}T00:00:00`);
-            query = query.gte('created_at', start.toISOString());
-        }
-        if (endDate) {
-            const end = new Date(`${endDate}T23:59:59.999`);
-            query = query.lte('created_at', end.toISOString());
-        }
+        try {
+            const res = await fetch(`/api/admin-logs?${params.toString()}`, {
+                headers: { 'X-User-Id': currentUser?.id || '' }
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(payload?.error || 'Error fetching logs');
 
-        const from = (page - 1) * pageSize;
-        const to = from + pageSize - 1;
-        query = query.range(from, to).order('created_at', { ascending: false });
-
-        const { data, error } = await query;
-        if (error) console.error("Error fetching logs:", error);
-        else {
-            if (isLoadMore) activityLogs = [...activityLogs, ...(data || [])];
-            else activityLogs = data || [];
-            
-            if (!data || data.length < pageSize) hasMore = false;
+            const data = payload.logs || [];
+            if (isLoadMore) activityLogs = [...activityLogs, ...data];
+            else activityLogs = data;
+            if (data.length < pageSize) hasMore = false;
+        } catch (error) {
+            console.error('Error fetching logs:', error);
         }
         loading = false;
     }

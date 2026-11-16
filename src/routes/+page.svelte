@@ -1477,7 +1477,7 @@
     $: coursesQuery = createQuery({
         queryKey: ['courses', currentUser?.role], // Refetch when role changes
         queryFn: async () => {
-            const courseColumns = 'id, title, description, category, duration, pdf_url, thumbnail_url, is_featured, is_published, created_at, sort_order, cert_template_url, cert_end_date, cert_start_date, post_test_auto_close_date, post_test_fixed_date, quiz_cooldown, has_pre_test, lessons_enabled, evaluation_form_id, cert_config';
+            const courseColumns = 'id, title, description, category, duration, pdf_url, thumbnail_url, is_featured, is_published, created_at, sort_order, cert_template_url, cert_end_date, cert_start_date, post_test_auto_close_date, post_test_fixed_date, quiz_cooldown, has_pre_test, allow_download, lessons_enabled, evaluation_form_id, cert_config';
             let query = supabase.from('courses').select(courseColumns).is('deleted_at', null).order('sort_order', {ascending: true}).order('created_at', {ascending: false}).limit(100);
             if (currentUser?.role !== 'admin' && currentUser?.role !== 'owner') {
                 query = query.eq('is_published', true).or(`published_at.is.null,published_at.lte.${new Date().toISOString()}`);
@@ -1720,7 +1720,6 @@
                     course={activeCourseForPlayer}
                     bind:lesson={activeLessonForPlayer}
                     lessons={activeCourseLessons}
-                    supabase={supabase}
                     currentUser={currentUser}
                     on:close={closeLesson}
                 />

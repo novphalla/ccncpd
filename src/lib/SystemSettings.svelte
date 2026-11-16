@@ -24,10 +24,10 @@
 
     async function logAdminAction(action, details = '') {
         if (!currentUser?.id) return;
-        await supabase.from('admin_logs').insert({
-            admin_id: currentUser.id,
-            action,
-            details
+        await fetch('/api/admin-logs', {
+            method: 'POST',
+            headers: { 'X-User-Id': currentUser.id, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, details })
         });
     }
 

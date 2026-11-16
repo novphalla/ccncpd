@@ -75,7 +75,7 @@
         queryKey: ['courses', 'admin'],
         queryFn: async () => {
             let query = supabase.from('courses')
-                .select('id, title, description, thumbnail_url, cover_url, is_published, sort_order, created_at, deleted_at, cpd_points, cert_template_url, cert_config, quiz_questions, evaluation_form_id, department')
+                .select('id, title, description, duration, pdf_url, thumbnail_url, cover_url, is_published, is_featured, sort_order, created_at, deleted_at, cpd_points, cert_template_url, cert_config, quiz_questions, evaluation_form_id, department, quiz_cooldown, quiz_passing_score, has_pre_test, allow_download, lessons_enabled, post_test_auto_close_date, post_test_fixed_date, cert_start_date, cert_end_date')
                 .is('deleted_at', null)
                 .order('sort_order', {ascending: true})
                 .order('created_at', {ascending: false})

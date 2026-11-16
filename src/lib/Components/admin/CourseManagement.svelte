@@ -586,10 +586,28 @@
         URL.revokeObjectURL(link.href); // Clean up memory
     }
 
-    function openModal(course = null) {
+    async function openModal(course = null) {
         loadEvaluationForms();
         newInviteCode = { code: '', description: '', max_uses: '', expires_at: '', auto_enroll: false };
-        editingCourse = course ? JSON.parse(JSON.stringify(course)) : {
+        let courseForEditing = course;
+
+        if (course?.id) {
+            loading = true;
+            const { data, error } = await supabase
+                .from('courses')
+                .select('*')
+                .eq('id', course.id)
+                .maybeSingle();
+            loading = false;
+
+            if (error) {
+                console.warn('Unable to load full course for editing:', error);
+            } else if (data) {
+                courseForEditing = data;
+            }
+        }
+
+        editingCourse = courseForEditing ? JSON.parse(JSON.stringify(courseForEditing)) : {
             title: '',
             description: '',
             pdf_url: '',
@@ -721,6 +739,7 @@
         if (!editingCourse.title) return alert("សូមបញ្ចូលចំណងជើងវគ្គសិក្សា!");
 
         loading = true;
+        const requestedAllowDownload = editingCourse.allow_download === true;
 
         editingCourse.cert_config = {
             ...(editingCourse.cert_config || {}),
@@ -740,7 +759,7 @@
             is_published: editingCourse.is_published,
             is_featured: editingCourse.is_featured,
             has_pre_test: editingCourse.has_pre_test,
-            allow_download: editingCourse.allow_download,
+            allow_download: requestedAllowDownload,
             pdf_url: editingCourse.pdf_url,
             thumbnail_url: editingCourse.thumbnail_url,
             cert_template_url: editingCourse.cert_template_url,
@@ -754,29 +773,41 @@
             lessons_enabled: editingCourse.lessons_enabled
         };
 
-        // Handle ID: Only include if valid UUID (not new)
-        if (editingCourse.id && !String(editingCourse.id).includes('new')) {
-            payload.id = editingCourse.id;
-        }
-
-        const { data, error } = await supabase.from('courses').upsert(payload).select().single();
+        const existingCourseId = editingCourse.id && !String(editingCourse.id).includes('new')
+            ? editingCourse.id
+            : null;
+        const saveQuery = existingCourseId
+            ? supabase.from('courses').update(payload).eq('id', existingCourseId)
+            : supabase.from('courses').insert(payload);
+        const { data, error } = await saveQuery.select().maybeSingle();
         
         loading = false;
         if (error) {
             alert("Error: " + error.message);
             return null;
+        } else if (!data) {
+            alert("មិនអាចរក្សាទុកវគ្គសិក្សាបានទេ។ សូមពិនិត្យសិទ្ធិ Admin រួចសាកល្បងម្តងទៀត។");
+            return null;
+        } else if (data.allow_download !== requestedAllowDownload) {
+            alert("តម្លៃ Download មិនត្រូវបានរក្សាទុកក្នុង database ទេ។ សូមអនុវត្ត database migration ហើយសាកល្បងម្តងទៀត។");
+            return null;
         } else {
-            if (data) {
-                editingCourse = {
-                    ...editingCourse,
-                    ...data,
-                    passing_score: data.quiz_passing_score ?? editingCourse.passing_score
-                };
-            }
+            editingCourse = {
+                ...editingCourse,
+                ...data,
+                passing_score: data.quiz_passing_score ?? editingCourse.passing_score
+            };
             if (closeModal) showModal = false;
             dispatch('refresh');
-            return data || editingCourse;
+            return data;
         }
+    }
+
+    function setAllowDownload(event) {
+        editingCourse = {
+            ...editingCourse,
+            allow_download: event.currentTarget.checked
+        };
     }
 
     async function saveCourse() {
@@ -1486,7 +1517,12 @@
                                     </label>
                                     <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
                                         <span class="font-bold text-gray-700 text-sm">Download</span>
-                                        <input type="checkbox" bind:checked={editingCourse.allow_download} class="toggle toggle-secondary toggle-sm" />
+                                        <input
+                                            type="checkbox"
+                                            checked={editingCourse.allow_download === true}
+                                            on:change={setAllowDownload}
+                                            class="toggle toggle-secondary toggle-sm"
+                                        />
                                     </label>
                                     <label class="flex items-center justify-between gap-3 bg-gray-50 p-3 rounded-xl border border-gray-200 cursor-pointer">
                                         <span class="font-bold text-gray-700 text-sm">Lessons</span>

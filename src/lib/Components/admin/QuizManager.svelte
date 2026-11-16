@@ -3,7 +3,8 @@
     import { flip } from 'svelte/animate';
     import { 
         PencilIcon, Trash2Icon, SaveIcon, XIcon, UploadIcon, 
-        DownloadIcon, ImageIcon, GripVerticalIcon, PlusIcon
+        DownloadIcon, ImageIcon, GripVerticalIcon, PlusIcon, CopyIcon,
+        ClipboardPasteIcon, CheckCircleIcon, AlertCircleIcon
     } from 'lucide-svelte';
 
     export let supabase;
@@ -15,6 +16,11 @@
     let loading = false;
     let newQuestion = { question: '', options: [], correct_answer: '', explanation: '', image_url: '' };
     let editingQuestionId = null;
+    let showBulkPaste = false;
+    let bulkPasteText = '';
+    let bulkPastePreview = [];
+    let bulkPasteError = '';
+    let bulkPasteLoading = false;
 
     async function loadQuestions() {
         if (!editingCourse?.id) return;
@@ -147,6 +153,29 @@
     function cancelEdit() {
         editingQuestionId = null;
         newQuestion = { question: '', options: [], correct_answer: '', explanation: '', image_url: '' };
+    }
+
+    function getQuestionOptions(q) {
+        return Array.isArray(q.options) ? [...q.options] : (typeof q.options === 'string' ? q.options.split(',').map(o => o.trim()).filter(Boolean) : []);
+    }
+
+    function scrollToQuestionForm() {
+        setTimeout(() => {
+            const form = document.getElementById('question-form');
+            if (form) form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 100);
+    }
+
+    function duplicateQuestion(q) {
+        editingQuestionId = null;
+        newQuestion = {
+            question: `${q.question || ''} (ចម្លង)`,
+            options: getQuestionOptions(q),
+            correct_answer: Number(q.correct_answer),
+            explanation: q.explanation || '',
+            image_url: q.image_url || ''
+        };
+        scrollToQuestionForm();
     }
 
     function downloadCsvTemplate() {
@@ -327,6 +356,189 @@
         reader.readAsText(file);
     }
 
+    function normalizeQuestionKey(text) {
+        return String(text || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    }
+
+    function stripQuestionPrefix(line) {
+        return line
+            .replace(/^\s*(?:\d+|[០-៩]+)\s*[\.\)\-៖:]\s*/, '')
+            .replace(/^\s*(?:q|question|សំណួរ)\s*(?:\d+|[០-៩]+)?\s*[\.\)\-៖:]?\s*/i, '')
+            .trim();
+    }
+
+    function optionIndexFromLabel(label) {
+        const clean = String(label || '').trim().toLowerCase();
+        const latin = 'abcdefghijklmnopqrstuvwxyz';
+        const latinIndex = latin.indexOf(clean);
+        if (latinIndex >= 0) return latinIndex;
+
+        const khmerLabels = ['ក', 'ខ', 'គ', 'ឃ', 'ង', 'ច', 'ឆ', 'ជ'];
+        const khmerIndex = khmerLabels.indexOf(clean);
+        if (khmerIndex >= 0) return khmerIndex;
+
+        const numeric = parseInt(clean, 10);
+        if (!isNaN(numeric) && numeric > 0) return numeric - 1;
+
+        return -1;
+    }
+
+    function findCorrectIndex(correctText, options) {
+        const token = String(correctText || '').trim();
+        if (!token) return -1;
+
+        const byLabel = optionIndexFromLabel(token.replace(/[\.\)]$/, ''));
+        if (byLabel >= 0 && byLabel < options.length) return byLabel;
+
+        const normalizedToken = normalizeQuestionKey(token);
+        return options.findIndex(option => normalizeQuestionKey(option) === normalizedToken);
+    }
+
+    function splitPasteIntoBlocks(text) {
+        const lines = String(text || '')
+            .replace(/\r/g, '')
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+
+        const blocks = [];
+        let current = [];
+        const questionStartPattern = /^(?:\d+|[០-៩]+)\s*[\.\)\-៖:]\s+|^(?:q|question|សំណួរ)\s*(?:\d+|[០-៩]+)?\s*[\.\)\-៖:]/i;
+
+        for (const line of lines) {
+            if (questionStartPattern.test(line) && current.length) {
+                blocks.push(current);
+                current = [line];
+            } else {
+                current.push(line);
+            }
+        }
+
+        if (current.length) blocks.push(current);
+        return blocks;
+    }
+
+    function parsePasteBlock(lines, blockIndex) {
+        const optionPattern = /^\s*([A-Ha-hកខគឃងចឆជ]|\d+)\s*[\.\)\-៖:]\s*(.+)$/;
+        const answerPattern = /^\s*(?:answer|correct answer|correct|ចម្លើយត្រឹមត្រូវ|ចម្លើយ|ចំលើយ)\s*[\-៖:]\s*(.+)$/i;
+        const explanationPattern = /^\s*(?:explanation|explain|ការពន្យល់|ពន្យល់)\s*[\-៖:]\s*(.+)$/i;
+
+        let questionParts = [];
+        const options = [];
+        let correctToken = '';
+        let explanationParts = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const answerMatch = line.match(answerPattern);
+            const explanationMatch = line.match(explanationPattern);
+            const optionMatch = line.match(optionPattern);
+
+            if (answerMatch) {
+                correctToken = answerMatch[1].trim();
+                continue;
+            }
+
+            if (explanationMatch) {
+                explanationParts.push(explanationMatch[1].trim());
+                continue;
+            }
+
+            if (optionMatch) {
+                let optionText = optionMatch[2].trim();
+                const markedCorrect = /(?:\*|✓|✔|\(correct\)|\[correct\]|ត្រឹមត្រូវ)$/i.test(optionText);
+                optionText = optionText
+                    .replace(/^\*\s*/, '')
+                    .replace(/\s*(?:\*|✓|✔|\(correct\)|\[correct\]|ត្រឹមត្រូវ)\s*$/i, '')
+                    .trim();
+
+                if (markedCorrect) correctToken = optionMatch[1].trim();
+                options.push(optionText);
+                continue;
+            }
+
+            if (options.length) explanationParts.push(line);
+            else questionParts.push(i === 0 ? stripQuestionPrefix(line) : line);
+        }
+
+        const question = questionParts.join(' ').trim();
+        const correct_answer = findCorrectIndex(correctToken, options);
+        const errors = [];
+
+        if (!question) errors.push('ខ្វះអត្ថបទសំណួរ');
+        if (options.length < 2) errors.push('ត្រូវការជម្រើសយ៉ាងហោចណាស់ ២');
+        if (correct_answer < 0) errors.push('រកមិនឃើញចម្លើយត្រឹមត្រូវ');
+
+        return {
+            question,
+            options,
+            correct_answer,
+            explanation: explanationParts.join(' ').trim(),
+            error: errors.join(', '),
+            sourceIndex: blockIndex + 1
+        };
+    }
+
+    function previewBulkPaste() {
+        bulkPasteError = '';
+        const blocks = splitPasteIntoBlocks(bulkPasteText);
+        bulkPastePreview = blocks.map(parsePasteBlock);
+
+        if (!bulkPasteText.trim()) {
+            bulkPastePreview = [];
+            bulkPasteError = 'សូម paste សំណួរជាមុនសិន។';
+        } else if (!bulkPastePreview.length) {
+            bulkPasteError = 'មិនអាចបំបែកសំណួរពីអត្ថបទនេះបានទេ។';
+        }
+    }
+
+    async function importBulkPaste() {
+        previewBulkPaste();
+        const existingKeys = new Set(editingQuestions.map(q => normalizeQuestionKey(q.question)));
+        const batchKeys = new Set();
+        let duplicateCount = 0;
+
+        const questionsToAdd = bulkPastePreview
+            .filter(item => !item.error)
+            .filter(item => {
+                const key = normalizeQuestionKey(item.question);
+                if (existingKeys.has(key) || batchKeys.has(key)) {
+                    duplicateCount++;
+                    return false;
+                }
+                batchKeys.add(key);
+                return true;
+            })
+            .map(item => ({
+                course_id: editingCourse.id,
+                question: item.question,
+                options: item.options,
+                correct_answer: item.correct_answer,
+                explanation: item.explanation || ''
+            }));
+
+        if (!questionsToAdd.length) {
+            const invalidCount = bulkPastePreview.filter(item => item.error).length;
+            return alert(invalidCount ? 'មិនមានសំណួរត្រឹមត្រូវសម្រាប់នាំចូលទេ។ សូមពិនិត្យ Preview។' : 'សំណួរទាំងនេះមានស្ទួនរួចហើយ។');
+        }
+
+        bulkPasteLoading = true;
+        const { error } = await supabase.from('quiz_questions').insert(questionsToAdd);
+        bulkPasteLoading = false;
+
+        if (error) {
+            alert("Import Error: " + error.message);
+        } else {
+            const dupMsg = duplicateCount ? `\n(សំណួរស្ទួនចំនួន ${duplicateCount} ត្រូវបានរំលង)` : '';
+            alert(`បាននាំចូល ${questionsToAdd.length} សំណួរជោគជ័យ!${dupMsg}`);
+            bulkPasteText = '';
+            bulkPastePreview = [];
+            showBulkPaste = false;
+            loadQuestions();
+            dispatch('refresh');
+        }
+    }
+
     let draggedQuestion = null;
 
     function handleQuestionDragStart(e, index) {
@@ -356,6 +568,9 @@
             ❓ គ្រប់គ្រងសំណួរ <span class="badge badge-info badge-outline badge-sm">{editingQuestions.length}</span>
         </h4>
         <div class="flex flex-wrap gap-2">
+            <button class="btn btn-sm btn-outline border-gray-200 hover:bg-gray-50 text-gray-600 rounded-lg" on:click={() => showBulkPaste = !showBulkPaste}>
+                <ClipboardPasteIcon class="w-4 h-4 mr-1" /> Paste ច្រើន
+            </button>
             <button class="btn btn-sm btn-outline border-gray-200 hover:bg-gray-50 text-gray-600 rounded-lg" on:click={downloadCsvTemplate}>
                 <DownloadIcon class="w-4 h-4 mr-1" /> គំរូ CSV
             </button>
@@ -374,6 +589,80 @@
             </button>
         </div>
     </div>
+
+    {#if showBulkPaste}
+        <div class="mb-6 p-4 bg-sky-50 rounded-2xl border border-sky-100">
+            <div class="flex justify-between items-start gap-4 mb-3">
+                <div>
+                    <h5 class="font-bold text-gray-800 flex items-center gap-2">
+                        <ClipboardPasteIcon class="w-4 h-4 text-sky-600" /> បញ្ចូលសំណួរច្រើនពី Copy/Paste
+                    </h5>
+                    <p class="text-xs text-gray-500 mt-1">ទម្រង់គាំទ្រ៖ 1. សំណួរ, A. ជម្រើស, B. ជម្រើស, Answer: A ឬ ចម្លើយ: A</p>
+                </div>
+                <button on:click={() => showBulkPaste = false} class="w-8 h-8 rounded-lg hover:bg-white flex items-center justify-center cursor-pointer border-0 outline-none text-gray-500">
+                    <XIcon class="w-4 h-4" />
+                </button>
+            </div>
+
+            <textarea
+                bind:value={bulkPasteText}
+                class="textarea textarea-bordered w-full bg-white rounded-xl min-h-[180px] text-sm leading-relaxed"
+                placeholder={`1. សំណួរគំរូ?\nA. ជម្រើសទី ១\nB. ជម្រើសទី ២\nC. ជម្រើសទី ៣\nAnswer: A\nExplanation: ការពន្យល់បើមាន`}
+            ></textarea>
+
+            {#if bulkPasteError}
+                <div class="alert alert-warning mt-3 text-sm rounded-xl">
+                    <AlertCircleIcon class="w-4 h-4" /> {bulkPasteError}
+                </div>
+            {/if}
+
+            {#if bulkPastePreview.length}
+                {@const validCount = bulkPastePreview.filter(item => !item.error).length}
+                {@const errorCount = bulkPastePreview.length - validCount}
+                <div class="mt-3 bg-white rounded-xl border border-sky-100 overflow-hidden">
+                    <div class="px-3 py-2 border-b border-sky-100 text-sm flex flex-wrap gap-3 items-center">
+                        <span class="font-bold text-gray-700">Preview {bulkPastePreview.length}</span>
+                        <span class="text-success font-bold">ត្រឹមត្រូវ {validCount}</span>
+                        {#if errorCount}
+                            <span class="text-error font-bold">មានបញ្ហា {errorCount}</span>
+                        {/if}
+                    </div>
+                    <div class="max-h-56 overflow-y-auto divide-y divide-gray-100">
+                        {#each bulkPastePreview as item}
+                            <div class="p-3 text-sm flex gap-3">
+                                {#if item.error}
+                                    <AlertCircleIcon class="w-4 h-4 text-error shrink-0 mt-0.5" />
+                                {:else}
+                                    <CheckCircleIcon class="w-4 h-4 text-success shrink-0 mt-0.5" />
+                                {/if}
+                                <div class="min-w-0 flex-1">
+                                    <p class="font-bold text-gray-800 truncate">{item.sourceIndex}. {item.question || 'សំណួរមិនទាន់ស្គាល់'}</p>
+                                    {#if item.error}
+                                        <p class="text-error text-xs mt-1">{item.error}</p>
+                                    {:else}
+                                        <p class="text-xs text-gray-500 mt-1">{item.options.length} ជម្រើស · ចម្លើយត្រឹមត្រូវ: {item.options[item.correct_answer]}</p>
+                                    {/if}
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                </div>
+            {/if}
+
+            <div class="flex flex-wrap gap-2 mt-3 justify-end">
+                <button class="btn btn-sm btn-outline rounded-lg" on:click={() => { bulkPasteText = ''; bulkPastePreview = []; bulkPasteError = ''; }}>
+                    សម្អាត
+                </button>
+                <button class="btn btn-sm btn-outline btn-info rounded-lg" on:click={previewBulkPaste}>
+                    Preview
+                </button>
+                <button class="btn btn-sm btn-primary text-white rounded-lg" on:click={importBulkPaste} disabled={bulkPasteLoading || !bulkPasteText.trim()}>
+                    {#if bulkPasteLoading}<span class="loading loading-spinner loading-xs"></span>{/if}
+                    នាំចូលពី Paste
+                </button>
+            </div>
+        </div>
+    {/if}
 
     <!-- Question List -->
     <div class="space-y-3 max-h-[500px] overflow-y-auto pr-1 custom-scrollbar mb-6">
@@ -407,6 +696,9 @@
                 </div>
                 
                 <div class="absolute top-3 right-3 flex gap-1 bg-white/90 backdrop-blur-sm rounded-lg p-1 shadow-sm z-10 border border-gray-100">
+                    <button on:click={() => duplicateQuestion(q)} class="w-7 h-7 rounded-md hover:bg-emerald-50 flex items-center justify-center cursor-pointer border-0 outline-none" style="color: #059669;" title="Duplicate">
+                        <CopyIcon class="w-4 h-4" />
+                    </button>
                     <button on:click={() => editQuestion(q)} class="w-7 h-7 rounded-md hover:bg-blue-50 flex items-center justify-center cursor-pointer border-0 outline-none" style="color: #0056b3;">
                         <PencilIcon class="w-4 h-4" />
                     </button>

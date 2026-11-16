@@ -1,19 +1,34 @@
 <script>
     import { onMount } from 'svelte';
     import { slide } from 'svelte/transition';
-    import { CheckCircleIcon, ClockIcon, CreditCardIcon, DownloadIcon, PrinterIcon, RefreshCwIcon, SearchIcon, Trash2Icon, UsersIcon, XCircleIcon } from 'lucide-svelte';
+    import { CheckCircleIcon, ClockIcon, CreditCardIcon, DownloadIcon, EyeIcon, PrinterIcon, RefreshCwIcon, SearchIcon, Trash2Icon, UsersIcon, XCircleIcon, XIcon } from 'lucide-svelte';
 
     export let supabase;
     export let currentUser;
     export let courses = [];
+
+    const enrollmentFetchSize = 1000;
+    const enrollmentSelectColumns = `
+        *,
+        course:courses!course_enrollments_course_id_fkey(title),
+        member:users!course_enrollments_user_id_fkey(full_name, name_latin, phone_number, gender, profile_data, avatar_url),
+        approver:users!course_enrollments_approved_by_fkey(full_name, name_latin)
+    `;
 
     let enrollments = [];
     let loading = false;
     let setupNeeded = false;
     let errorMessage = '';
     let statusFilter = 'all';
+    let pricingFilter = 'all';
+    let activeEnrollmentTab = 'all';
     let courseFilter = 'all';
     let searchTerm = '';
+    let registeredFrom = '';
+    let registeredTo = '';
+    let enrollmentPage = 1;
+    let enrollmentsPerPage = 10;
+    let proofPreviewEnrollment = null;
     let showSummary = true;
     let showFinance = true;
     let showCouponManager = false;
@@ -23,6 +38,9 @@
     let manualCourseId = '';
     let manualUserSearch = '';
     let manualUserResults = [];
+    let manualBulkText = '';
+    let manualBulkMatches = [];
+    let manualBulkMessage = '';
     let manualAddLoading = false;
     let manualAddMode = 'approved';
     let coupons = [];
@@ -56,8 +74,14 @@
     };
 
     $: filteredEnrollments = enrollments.filter(row => {
-        const statusMatches = statusFilter === 'all' || row.status === statusFilter || row.payment_status === statusFilter;
+        const statusMatches = statusFilter === 'all'
+            || (statusFilter === 'pending_payment' && (row.status === 'pending_payment' || row.payment_status === 'pending'))
+            || row.status === statusFilter
+            || row.payment_status === statusFilter;
+        const pricingMatches = pricingFilter === 'all'
+            || (pricingFilter === 'free' ? row.pricing_type !== 'paid' : row.pricing_type === pricingFilter);
         const courseMatches = courseFilter === 'all' || row.course_id === courseFilter;
+        const registeredMatches = matchesRegisteredDate(row.registered_at);
         const query = searchTerm.trim().toLowerCase();
         const searchableText = [
             row.member?.full_name,
@@ -65,10 +89,12 @@
             row.member?.phone_number,
             row.course?.title,
             row.status,
-            row.payment_status
+            row.payment_status,
+            row.payment_note,
+            row.payment_reference
         ].filter(Boolean).join(' ').toLowerCase();
 
-        return statusMatches && courseMatches && (!query || searchableText.includes(query));
+        return statusMatches && pricingMatches && courseMatches && registeredMatches && (!query || searchableText.includes(query));
     });
 
     $: filteredStats = {
@@ -84,9 +110,33 @@
     $: demographicStats = buildDemographicStats(filteredEnrollments);
     $: financeStats = buildFinanceStats(filteredEnrollments);
     $: courseFinanceRows = buildCourseFinanceRows(filteredEnrollments);
+    $: totalEnrollmentPages = Math.max(1, Math.ceil(filteredEnrollments.length / Number(enrollmentsPerPage)));
+    $: if (enrollmentPage > totalEnrollmentPages) enrollmentPage = totalEnrollmentPages;
+    $: paginatedEnrollments = filteredEnrollments.slice((enrollmentPage - 1) * Number(enrollmentsPerPage), enrollmentPage * Number(enrollmentsPerPage));
+    $: enrollmentPageStart = filteredEnrollments.length > 0 ? ((enrollmentPage - 1) * Number(enrollmentsPerPage)) + 1 : 0;
+    $: enrollmentPageEnd = Math.min(enrollmentPage * Number(enrollmentsPerPage), filteredEnrollments.length);
     $: selectedEnrollments = enrollments.filter(row => selectedEnrollmentIds.has(row.id));
     $: selectedCount = selectedEnrollments.length;
-    $: allFilteredSelected = filteredEnrollments.length > 0 && filteredEnrollments.every(row => selectedEnrollmentIds.has(row.id));
+    $: allPageSelected = paginatedEnrollments.length > 0 && paginatedEnrollments.every(row => selectedEnrollmentIds.has(row.id));
+    $: enrollmentTabStats = {
+        all: enrollments.length,
+        pending: enrollments.filter(row => row.status === 'pending_payment' || row.payment_status === 'pending').length,
+        approved: enrollments.filter(row => row.status === 'approved' || row.payment_status === 'approved').length,
+        rejected: enrollments.filter(row => row.status === 'rejected' || row.payment_status === 'rejected').length,
+        free: enrollments.filter(row => row.pricing_type !== 'paid').length,
+        paid: enrollments.filter(row => row.pricing_type === 'paid').length
+    };
+    $: enrollmentTabs = [
+        { key: 'all', label: 'All', count: enrollmentTabStats.all },
+        { key: 'pending', label: 'Pending Payment', count: enrollmentTabStats.pending },
+        { key: 'approved', label: 'Approved', count: enrollmentTabStats.approved },
+        { key: 'rejected', label: 'Rejected', count: enrollmentTabStats.rejected },
+        { key: 'free', label: 'Free', count: enrollmentTabStats.free },
+        { key: 'paid', label: 'Paid', count: enrollmentTabStats.paid }
+    ];
+    $: manualBulkFoundRows = manualBulkMatches.filter(row => row.user);
+    $: manualBulkExistingRows = manualBulkFoundRows.filter(row => row.existingEnrollment);
+    $: manualBulkNewRows = manualBulkFoundRows.filter(row => !row.existingEnrollment);
 
     onMount(() => {
         loadEnrollments();
@@ -108,16 +158,31 @@
         setupNeeded = false;
         errorMessage = '';
 
-        const { data, error } = await supabase
-            .from('course_enrollments')
-            .select(`
-                *,
-                course:courses!course_enrollments_course_id_fkey(title),
-                member:users!course_enrollments_user_id_fkey(full_name, name_latin, phone_number, gender, profile_data, avatar_url),
-                approver:users!course_enrollments_approved_by_fkey(full_name, name_latin)
-            `)
-            .order('registered_at', { ascending: false })
-            .limit(300);
+        let data = [];
+        let error = null;
+        let expectedTotal = null;
+        let from = 0;
+
+        while (true) {
+            const response = await supabase
+                .from('course_enrollments')
+                .select(enrollmentSelectColumns, { count: expectedTotal === null ? 'exact' : undefined })
+                .order('registered_at', { ascending: false })
+                .range(from, from + enrollmentFetchSize - 1);
+
+            if (response.error) {
+                error = response.error;
+                break;
+            }
+
+            if (expectedTotal === null) expectedTotal = response.count ?? null;
+
+            const batch = response.data || [];
+            data = [...data, ...batch];
+
+            if (batch.length < enrollmentFetchSize || (expectedTotal !== null && data.length >= expectedTotal)) break;
+            from += enrollmentFetchSize;
+        }
 
         if (error) {
             if (error.code === '42P01' || error.code === 'PGRST205') {
@@ -134,6 +199,14 @@
     }
 
     async function updateEnrollment(row, status) {
+        let rejectReason = null;
+        if (status === 'rejected') {
+            rejectReason = prompt('មូលហេតុ Reject payment/registration:', row.payment_note || '');
+            if (rejectReason === null) return;
+            rejectReason = rejectReason.trim();
+            if (!rejectReason) return alert('សូមបញ្ចូលមូលហេតុ reject មុនសិន។');
+        }
+
         const updates = {
             status,
             payment_status: status === 'approved' ? 'approved' : status === 'rejected' ? 'rejected' : row.payment_status,
@@ -142,6 +215,8 @@
             updated_at: new Date().toISOString()
         };
 
+        if (status === 'rejected') updates.payment_note = rejectReason;
+
         const { error } = await supabase
             .from('course_enrollments')
             .update(updates)
@@ -149,6 +224,7 @@
 
         if (error) return alert('Error: ' + error.message);
         await loadEnrollments();
+        if (proofPreviewEnrollment?.id === row.id) closeProofPreview();
     }
 
     async function waiveEnrollment(row) {
@@ -182,11 +258,68 @@
         selectedEnrollmentIds = new Set(selectedEnrollmentIds);
     }
 
-    function toggleAllFiltered() {
-        if (allFilteredSelected) {
-            filteredEnrollments.forEach(row => selectedEnrollmentIds.delete(row.id));
+    function resetEnrollmentPage() {
+        enrollmentPage = 1;
+    }
+
+    function setEnrollmentTab(tab) {
+        activeEnrollmentTab = tab;
+        if (tab === 'pending') {
+            statusFilter = 'pending_payment';
+            pricingFilter = 'all';
+        } else if (tab === 'approved') {
+            statusFilter = 'approved';
+            pricingFilter = 'all';
+        } else if (tab === 'rejected') {
+            statusFilter = 'rejected';
+            pricingFilter = 'all';
+        } else if (tab === 'free') {
+            statusFilter = 'all';
+            pricingFilter = 'free';
+        } else if (tab === 'paid') {
+            statusFilter = 'all';
+            pricingFilter = 'paid';
         } else {
-            filteredEnrollments.forEach(row => selectedEnrollmentIds.add(row.id));
+            statusFilter = 'all';
+            pricingFilter = 'all';
+        }
+        resetEnrollmentPage();
+    }
+
+    function markCustomEnrollmentFilter() {
+        activeEnrollmentTab = 'custom';
+        resetEnrollmentPage();
+    }
+
+    function clearEnrollmentFilters() {
+        searchTerm = '';
+        courseFilter = 'all';
+        registeredFrom = '';
+        registeredTo = '';
+        setEnrollmentTab('all');
+    }
+
+    function matchesRegisteredDate(value) {
+        if (!registeredFrom && !registeredTo) return true;
+        if (!value) return false;
+        const registeredAt = new Date(value);
+        if (Number.isNaN(registeredAt.getTime())) return false;
+        if (registeredFrom) {
+            const from = new Date(`${registeredFrom}T00:00:00`);
+            if (registeredAt < from) return false;
+        }
+        if (registeredTo) {
+            const to = new Date(`${registeredTo}T23:59:59.999`);
+            if (registeredAt > to) return false;
+        }
+        return true;
+    }
+
+    function toggleCurrentPageSelection() {
+        if (allPageSelected) {
+            paginatedEnrollments.forEach(row => selectedEnrollmentIds.delete(row.id));
+        } else {
+            paginatedEnrollments.forEach(row => selectedEnrollmentIds.add(row.id));
         }
         selectedEnrollmentIds = new Set(selectedEnrollmentIds);
     }
@@ -200,6 +333,14 @@
         if (ids.length === 0) return;
 
         const label = status === 'approved' ? 'approve' : 'reject';
+        let rejectReason = null;
+        if (status === 'rejected') {
+            rejectReason = prompt(`មូលហេតុ Reject សម្រាប់ការចុះឈ្មោះចំនួន ${ids.length}:`, '');
+            if (rejectReason === null) return;
+            rejectReason = rejectReason.trim();
+            if (!rejectReason) return alert('សូមបញ្ចូលមូលហេតុ reject មុនសិន។');
+        }
+
         if (!confirm(`តើអ្នកចង់ ${label} ការចុះឈ្មោះចំនួន ${ids.length} មែនទេ?`)) return;
 
         bulkLoading = true;
@@ -210,6 +351,8 @@
             approved_by: status === 'approved' ? currentUser?.id : null,
             updated_at: new Date().toISOString()
         };
+
+        if (status === 'rejected') updates.payment_note = rejectReason;
 
         const { error } = await supabase
             .from('course_enrollments')
@@ -272,13 +415,44 @@
         manualUserResults = data || [];
     }
 
-    async function addManualEnrollment(user) {
-        if (!manualCourse) return alert('សូមជ្រើសវគ្គសិក្សាជាមុនសិន។');
-        if (!user?.id) return;
+    function normalizeKhmerDigits(value) {
+        const khmerDigits = '០១២៣៤៥៦៧៨៩';
+        return String(value || '').replace(/[០-៩]/g, digit => String(khmerDigits.indexOf(digit)));
+    }
+
+    function cleanManualLookup(value) {
+        return normalizeKhmerDigits(value)
+            .replace(/[,%]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function manualUserLabel(user) {
+        return user?.full_name || user?.name_latin || user?.phone_number || 'មិនមានឈ្មោះ';
+    }
+
+    function existingManualEnrollmentForUser(user) {
+        if (!manualCourse?.id || !user?.id) return null;
+        return enrollments.find(row =>
+            String(row.course_id) === String(manualCourse.id)
+            && String(row.user_id) === String(user.id)
+        ) || null;
+    }
+
+    function manualEnrollmentStateText(enrollment) {
+        if (!enrollment) return 'ថ្មី';
+        return `មានរួច · ${statusLabel(enrollment)}`;
+    }
+
+    function manualEnrollmentStateClass(enrollment) {
+        return enrollment ? 'badge-warning' : 'badge-success text-white';
+    }
+
+    function buildManualEnrollmentPayload(user, nowIso = new Date().toISOString()) {
+        if (!manualCourse || !user?.id) return null;
 
         const program = programConfigFor(manualCourse);
         const isPaid = program.pricing_type === 'paid';
-        const nowIso = new Date().toISOString();
 		const status = manualAddMode === 'pending_payment' && isPaid ? 'pending_payment' : 'approved';
         const paymentStatus = !isPaid
             ? 'not_required'
@@ -288,7 +462,7 @@
                     ? 'pending'
                     : 'approved';
 
-        const payload = {
+        return {
             course_id: manualCourse.id,
             user_id: user.id,
             status,
@@ -307,15 +481,152 @@
             registered_at: nowIso,
             updated_at: nowIso
         };
+    }
+
+    async function addManualEnrollment(user) {
+        if (!manualCourse) return alert('សូមជ្រើសវគ្គសិក្សាជាមុនសិន។');
+        if (!user?.id) return;
+
+        const existingEnrollment = existingManualEnrollmentForUser(user);
+        const payload = buildManualEnrollmentPayload(user);
 
         const { error } = await supabase
             .from('course_enrollments')
             .upsert(payload, { onConflict: 'course_id,user_id' });
 
         if (error) return alert('Error: ' + error.message);
-        alert(`បានបន្ថែម "${user.full_name || user.name_latin || user.phone_number}" ចូលវគ្គ "${manualCourse.title}" រួចរាល់។`);
+        alert(existingEnrollment
+            ? `បានធ្វើបច្ចុប្បន្នភាព "${manualUserLabel(user)}" ក្នុងវគ្គ "${manualCourse.title}" រួចរាល់។`
+            : `បានបន្ថែម "${manualUserLabel(user)}" ចូលវគ្គ "${manualCourse.title}" រួចរាល់។`
+        );
         manualUserSearch = '';
         manualUserResults = [];
+        await loadEnrollments();
+    }
+
+    function parseManualBulkEntries() {
+        const seen = new Set();
+        return manualBulkText
+            .split(/\r?\n/)
+            .map(line => cleanManualLookup(line))
+            .filter(Boolean)
+            .map(line => {
+                const phoneMatch = line.match(/(?:\+?855|0)?\d[\d\s.-]{5,}\d/);
+                const lookup = cleanManualLookup(phoneMatch?.[0] || line);
+                const key = lookup.toLowerCase();
+                if (seen.has(key)) return null;
+                seen.add(key);
+                return { raw: line, lookup, user: null };
+            })
+            .filter(Boolean);
+    }
+
+    function userMatchesBulkLookup(user, lookup) {
+        const query = cleanManualLookup(lookup).toLowerCase();
+        if (!query) return false;
+        const phoneCompact = cleanManualLookup(user?.phone_number).replace(/\D/g, '');
+        const queryCompact = query.replace(/\D/g, '');
+        const text = [
+            user?.full_name,
+            user?.name_latin,
+            user?.phone_number
+        ].map(value => cleanManualLookup(value).toLowerCase()).filter(Boolean).join(' ');
+
+        return text.includes(query)
+            || (queryCompact.length >= 6 && phoneCompact.includes(queryCompact))
+            || (queryCompact.length >= 6 && phoneCompact.length >= 6 && queryCompact.includes(phoneCompact));
+    }
+
+    async function previewManualBulkUsers() {
+        if (!manualCourse) return alert('សូមជ្រើសវគ្គសិក្សាជាមុនសិន។');
+        manualBulkMessage = '';
+        manualBulkMatches = [];
+        const entries = parseManualBulkEntries();
+        if (!entries.length) {
+            manualBulkMessage = 'សូម paste លេខទូរស័ព្ទ ឬឈ្មោះ មួយជួរម្នាក់។';
+            return;
+        }
+
+        manualAddLoading = true;
+        const foundUsers = [];
+        for (let index = 0; index < entries.length; index += 8) {
+            const batch = entries.slice(index, index + 8);
+            const filters = batch.flatMap(entry => {
+                const query = entry.lookup.replace(/[()]/g, '').trim();
+                if (!query) return [];
+                return [
+                    `phone_number.ilike.%${query}%`,
+                    `full_name.ilike.%${query}%`,
+                    `name_latin.ilike.%${query}%`
+                ];
+            });
+            if (!filters.length) continue;
+
+            const { data, error } = await supabase
+                .from('users')
+                .select('id, full_name, name_latin, phone_number, gender, profile_data')
+                .or(filters.join(','))
+                .limit(100);
+
+            if (error) {
+                manualAddLoading = false;
+                return alert('Error: ' + error.message);
+            }
+            foundUsers.push(...(data || []));
+        }
+
+        const uniqueUsers = Array.from(new Map(foundUsers.map(user => [user.id, user])).values());
+        const usedUserIds = new Set();
+        manualBulkMatches = entries.map(entry => {
+            const matches = uniqueUsers.filter(user => userMatchesBulkLookup(user, entry.lookup));
+            const user = matches.find(candidate => !usedUserIds.has(candidate.id)) || null;
+            const duplicateUser = !user && matches.length ? matches[0] : null;
+            if (user) usedUserIds.add(user.id);
+            return {
+                ...entry,
+                user,
+                duplicateUser,
+                existingEnrollment: user ? existingManualEnrollmentForUser(user) : null,
+                alternatives: matches.filter(candidate => candidate.id !== user?.id).slice(0, 3)
+            };
+        });
+
+        const foundCount = manualBulkMatches.filter(row => row.user).length;
+        const duplicateCount = manualBulkMatches.filter(row => row.duplicateUser).length;
+        const missingCount = manualBulkMatches.length - foundCount - duplicateCount;
+        const existingCount = manualBulkMatches.filter(row => row.existingEnrollment).length;
+        const newCount = foundCount - existingCount;
+        manualBulkMessage = `រកឃើញ ${foundCount} នាក់ · ថ្មី ${newCount} · មានរួច ${existingCount}${duplicateCount ? ` · ស្ទួន ${duplicateCount}` : ''}${missingCount ? ` · មិនរកឃើញ ${missingCount} ជួរ` : ''}`;
+        manualAddLoading = false;
+    }
+
+    async function addManualBulkEnrollments() {
+        if (!manualCourse) return alert('សូមជ្រើសវគ្គសិក្សាជាមុនសិន។');
+        const rows = manualBulkMatches
+            .filter(row => row.user)
+            .map(row => ({
+                ...row,
+                existingEnrollment: row.existingEnrollment || existingManualEnrollmentForUser(row.user)
+            }));
+        if (!rows.length) return alert('មិនទាន់មានសមាជិកដែលរកឃើញសម្រាប់បន្ថែមទេ។');
+
+        const nowIso = new Date().toISOString();
+        const uniqueRows = Array.from(new Map(rows.map(row => [row.user.id, row])).values());
+        const payloads = uniqueRows
+            .map(row => buildManualEnrollmentPayload(row.user, nowIso))
+            .filter(Boolean);
+        const existingCount = uniqueRows.filter(row => row.existingEnrollment).length;
+        const newCount = payloads.length - existingCount;
+
+        manualAddLoading = true;
+        const { error } = await supabase
+            .from('course_enrollments')
+            .upsert(payloads, { onConflict: 'course_id,user_id' });
+
+        manualAddLoading = false;
+        if (error) return alert('Error: ' + error.message);
+
+        manualBulkMessage = `រួចរាល់: បន្ថែមថ្មី ${newCount} នាក់ · ធ្វើបច្ចុប្បន្នភាព ${existingCount} នាក់ ក្នុងវគ្គ "${manualCourse.title}"។`;
         await loadEnrollments();
     }
 
@@ -405,6 +716,28 @@
         if (row.pricing_type !== 'paid') return 'Free';
         const amount = row.final_price ?? row.price ?? 0;
         return `${Number(amount || 0).toLocaleString()} ${row.currency || 'KHR'}`;
+    }
+
+    function openProofPreview(row) {
+        proofPreviewEnrollment = row;
+    }
+
+    function closeProofPreview() {
+        proofPreviewEnrollment = null;
+    }
+
+    function isImageProof(url) {
+        return /\.(png|jpe?g|gif|webp|bmp|avif)(\?.*)?$/i.test(url || '');
+    }
+
+    function isPdfProof(url) {
+        return /\.pdf(\?.*)?$/i.test(url || '');
+    }
+
+    function noteLabel(row) {
+        return row.status === 'rejected' || row.payment_status === 'rejected'
+            ? 'មូលហេតុ Reject'
+            : 'Note';
     }
 
     function formatCurrency(amount, currency = 'KHR') {
@@ -1009,14 +1342,6 @@
             </div>
 
             <div class="flex flex-col sm:flex-row gap-2">
-                <select bind:value={statusFilter} class="select select-bordered bg-white min-w-44">
-                    <option value="all">ស្ថានភាពទាំងអស់</option>
-                    <option value="pending_payment">រង់ចាំ payment</option>
-                    <option value="registered">បានចុះឈ្មោះ</option>
-                    <option value="approved">Approved</option>
-                    <option value="rejected">Rejected</option>
-                    <option value="waived">Waived</option>
-                </select>
                 <button class="btn btn-outline" on:click={loadEnrollments} disabled={loading}>
                     {#if loading}
                         <span class="loading loading-spinner loading-sm"></span>
@@ -1037,6 +1362,18 @@
         </div>
 
         {#if !setupNeeded && !errorMessage}
+            <div class="mt-5 flex flex-wrap gap-2">
+                {#each enrollmentTabs as tab}
+                    <button
+                        class="btn btn-sm {activeEnrollmentTab === tab.key ? 'btn-primary text-white' : 'btn-outline'}"
+                        on:click={() => setEnrollmentTab(tab.key)}
+                    >
+                        {tab.label}
+                        <span class="badge badge-sm {activeEnrollmentTab === tab.key ? 'badge-neutral' : 'badge-ghost'}">{tab.count}</span>
+                    </button>
+                {/each}
+            </div>
+
             <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-5">
                 <div class="rounded-xl border border-primary/20 bg-primary/5 p-4">
                     <div class="flex items-center justify-between text-primary">
@@ -1534,27 +1871,114 @@
                         {#if manualUserResults.length > 0}
                             <div class="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
                                 {#each manualUserResults as user}
+                                    {@const existingManual = existingManualEnrollmentForUser(user)}
                                     <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 flex items-center justify-between gap-3">
                                         <div class="min-w-0">
-                                            <div class="font-bold text-gray-900 truncate">{user.full_name || user.name_latin || 'មិនមានឈ្មោះ'}</div>
+                                            <div class="flex items-center gap-2 min-w-0">
+                                                <div class="font-bold text-gray-900 truncate">{user.full_name || user.name_latin || 'មិនមានឈ្មោះ'}</div>
+                                                <span class="badge badge-xs {manualEnrollmentStateClass(existingManual)} shrink-0">
+                                                    {manualEnrollmentStateText(existingManual)}
+                                                </span>
+                                            </div>
                                             <div class="text-xs text-gray-500 truncate">{[user.phone_number, user.name_latin, user.gender].filter(Boolean).join(' · ')}</div>
                                         </div>
-                                        <button class="btn btn-xs btn-success text-white" on:click={() => addManualEnrollment(user)} disabled={!manualCourseId || manualAddLoading}>
-                                            បន្ថែម
+                                        <button class="btn btn-xs {existingManual ? 'btn-warning' : 'btn-success text-white'}" on:click={() => addManualEnrollment(user)} disabled={!manualCourseId || manualAddLoading}>
+                                            {existingManual ? 'Update' : 'បន្ថែម'}
                                         </button>
                                     </div>
                                 {/each}
                             </div>
                         {/if}
+
+                        <div class="mt-4 border-t border-gray-200 pt-4">
+                            <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2 mb-2">
+                                <div>
+                                    <h5 class="font-bold text-gray-900">បន្ថែមម្តងច្រើនៗ</h5>
+                                    <p class="text-xs text-gray-500 mt-1">Paste ពី Excel/Telegram បាន។ ដាក់លេខទូរស័ព្ទ ឬឈ្មោះ មួយជួរម្នាក់។</p>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button class="btn btn-sm btn-outline" on:click={() => { manualBulkText = ''; manualBulkMatches = []; manualBulkMessage = ''; }} disabled={manualAddLoading}>
+                                        សម្អាត
+                                    </button>
+                                    <button class="btn btn-sm btn-primary" on:click={previewManualBulkUsers} disabled={manualAddLoading || !manualBulkText.trim()}>
+                                        {manualAddLoading ? 'កំពុងពិនិត្យ...' : 'ពិនិត្យបញ្ជី'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <textarea
+                                bind:value={manualBulkText}
+                                class="textarea textarea-bordered w-full bg-white min-h-32 font-mono text-sm"
+                                placeholder={"ឧទាហរណ៍:\n012345678\n098765432\nសុខ ស្រីណា\t011222333"}
+                            ></textarea>
+
+                            {#if manualBulkMessage}
+                                <div class="mt-2 rounded-xl border border-primary/10 bg-primary/5 px-3 py-2 text-sm font-bold text-primary">
+                                    {manualBulkMessage}
+                                </div>
+                            {/if}
+
+                            {#if manualBulkMatches.length > 0}
+                                <div class="mt-3 max-h-64 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50">
+                                    {#each manualBulkMatches as row}
+                                        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-gray-200 px-3 py-2 last:border-b-0">
+                                            <div class="min-w-0">
+                                                <div class="text-xs font-mono text-gray-500 truncate">{row.raw}</div>
+                                                {#if row.user}
+                                                    <div class="font-bold text-gray-900 truncate">{manualUserLabel(row.user)}</div>
+                                                    <div class="text-xs text-gray-500 truncate">{[row.user.phone_number, row.user.name_latin, row.user.gender].filter(Boolean).join(' · ')}</div>
+                                                    {#if row.existingEnrollment}
+                                                        <div class="text-[11px] font-bold text-warning mt-0.5">មានរួចក្នុងវគ្គនេះ: {statusLabel(row.existingEnrollment)}</div>
+                                                    {/if}
+                                                {:else if row.duplicateUser}
+                                                    <div class="font-bold text-warning">ស្ទួនក្នុងបញ្ជី</div>
+                                                    <div class="text-xs text-gray-500 truncate">{manualUserLabel(row.duplicateUser)} · {[row.duplicateUser.phone_number, row.duplicateUser.name_latin].filter(Boolean).join(' · ')}</div>
+                                                {:else}
+                                                    <div class="font-bold text-error">មិនរកឃើញសមាជិកនេះ</div>
+                                                {/if}
+                                            </div>
+                                            <span class="badge {row.user ? manualEnrollmentStateClass(row.existingEnrollment) : row.duplicateUser ? 'badge-warning' : 'badge-error text-white'} shrink-0">
+                                                {row.user ? manualEnrollmentStateText(row.existingEnrollment) : row.duplicateUser ? 'ស្ទួន' : 'មិនរកឃើញ'}
+                                            </span>
+                                        </div>
+                                    {/each}
+                                </div>
+
+                                <div class="mt-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                    <p class="text-xs text-gray-500">អ្នកដែលមិនរកឃើញនឹងមិនត្រូវបានបន្ថែមទេ។ `មានរួច` នឹងត្រូវ update មិនបង្ក duplicate។</p>
+                                    <button class="btn btn-success text-white" on:click={addManualBulkEnrollments} disabled={!manualCourseId || manualAddLoading || manualBulkMatches.every(row => !row.user)}>
+                                        {manualAddLoading ? 'កំពុងបន្ថែម...' : `បន្ថែមថ្មី ${manualBulkNewRows.length} · Update ${manualBulkExistingRows.length}`}
+                                    </button>
+                                </div>
+                            {/if}
+                        </div>
                     </div>
                 {/if}
 
-                <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-3">
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_180px_150px_180px_180px_120px] gap-3">
                     <label class="input input-bordered bg-white flex items-center gap-2">
                         <SearchIcon class="w-4 h-4 text-gray-400" />
-                        <input bind:value={searchTerm} type="text" class="grow" placeholder="ស្វែងរកឈ្មោះ លេខទូរស័ព្ទ ឬវគ្គ..." />
+                        <input bind:value={searchTerm} on:input={resetEnrollmentPage} type="text" class="grow" placeholder="ស្វែងរកឈ្មោះ លេខទូរស័ព្ទ ឬវគ្គ..." />
                     </label>
-                    <select bind:value={courseFilter} class="select select-bordered bg-white">
+                    <select bind:value={statusFilter} on:change={markCustomEnrollmentFilter} class="select select-bordered bg-white">
+                        <option value="all">ស្ថានភាពទាំងអស់</option>
+                        <option value="pending_payment">រង់ចាំ payment</option>
+                        <option value="registered">បានចុះឈ្មោះ</option>
+                        <option value="approved">Approved</option>
+                        <option value="rejected">Rejected</option>
+                        <option value="waived">Waived</option>
+                    </select>
+                    <select bind:value={pricingFilter} on:change={markCustomEnrollmentFilter} class="select select-bordered bg-white">
+                        <option value="all">Free/Paid</option>
+                        <option value="free">Free</option>
+                        <option value="paid">Paid</option>
+                    </select>
+                    <input type="date" bind:value={registeredFrom} on:change={resetEnrollmentPage} class="input input-bordered bg-white" title="ចាប់ពីថ្ងៃចុះឈ្មោះ" />
+                    <input type="date" bind:value={registeredTo} on:change={resetEnrollmentPage} class="input input-bordered bg-white" title="ដល់ថ្ងៃចុះឈ្មោះ" />
+                    <button class="btn btn-outline" on:click={clearEnrollmentFilters} disabled={loading}>
+                        Clear
+                    </button>
+                    <select bind:value={courseFilter} on:change={resetEnrollmentPage} class="select select-bordered bg-white md:col-span-2 xl:col-span-6">
                         <option value="all">វគ្គទាំងអស់</option>
                         {#each courseOptions as course}
                             <option value={course.id}>{course.title}</option>
@@ -1606,8 +2030,8 @@
                                     <input
                                         type="checkbox"
                                         class="checkbox checkbox-sm checkbox-primary"
-                                        checked={allFilteredSelected}
-                                        on:change={toggleAllFiltered}
+                                        checked={allPageSelected}
+                                        on:change={toggleCurrentPageSelection}
                                         aria-label="ជ្រើសទាំងអស់"
                                     />
                                 </th>
@@ -1620,7 +2044,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {#each filteredEnrollments as row}
+                            {#each paginatedEnrollments as row}
                                 <tr>
                                     <td>
                                         <input
@@ -1662,10 +2086,16 @@
                                             <div class="text-xs font-mono text-gray-600 mt-1 break-all">Ref: {row.payment_reference}</div>
                                         {/if}
                                         {#if row.payment_proof_url}
-                                            <a href={row.payment_proof_url} target="_blank" rel="noreferrer"
+                                            <button type="button" on:click={() => openProofPreview(row)}
                                                 class="btn btn-xs btn-outline btn-info mt-2">
+                                                <EyeIcon class="w-3 h-3" />
                                                 មើលបង្កាន់ដៃ
-                                            </a>
+                                            </button>
+                                        {/if}
+                                        {#if row.payment_note}
+                                            <div class="text-xs mt-1 {row.status === 'rejected' || row.payment_status === 'rejected' ? 'text-error' : 'text-gray-500'}">
+                                                <span class="font-bold">{noteLabel(row)}:</span> {row.payment_note}
+                                            </div>
                                         {/if}
                                         <div class="text-xs text-gray-500 mt-1">{row.payment_status || '-'}</div>
                                     </td>
@@ -1717,7 +2147,101 @@
                         </tbody>
                     </table>
                 </div>
+                <div class="flex flex-col md:flex-row justify-between items-center gap-4 p-4 border-t border-base-300 bg-white">
+                    <div class="text-sm text-gray-500">
+                        បង្ហាញ {enrollmentPageStart} ដល់ {enrollmentPageEnd} នៃ {filteredEnrollments.length}
+                    </div>
+                    <div class="join">
+                        <button class="join-item btn btn-sm btn-outline" disabled={enrollmentPage <= 1} on:click={() => enrollmentPage = 1}>«</button>
+                        <button class="join-item btn btn-sm btn-outline" disabled={enrollmentPage <= 1} on:click={() => enrollmentPage--}>‹</button>
+                        <button class="join-item btn btn-sm btn-ghost">ទំព័រ {enrollmentPage} / {totalEnrollmentPages}</button>
+                        <button class="join-item btn btn-sm btn-outline" disabled={enrollmentPage >= totalEnrollmentPages} on:click={() => enrollmentPage++}>›</button>
+                        <button class="join-item btn btn-sm btn-outline" disabled={enrollmentPage >= totalEnrollmentPages} on:click={() => enrollmentPage = totalEnrollmentPages}>»</button>
+                    </div>
+                    <select bind:value={enrollmentsPerPage} on:change={() => enrollmentPage = 1} class="select select-bordered select-sm bg-white">
+                        <option value={10}>10 / ទំព័រ</option>
+                        <option value={20}>20 / ទំព័រ</option>
+                        <option value={50}>50 / ទំព័រ</option>
+                        <option value={100}>100 / ទំព័រ</option>
+                    </select>
+                </div>
             {/if}
         </section>
     {/if}
 </div>
+
+{#if proofPreviewEnrollment}
+    <div class="modal modal-open">
+        <div class="modal-box max-w-5xl bg-white p-0 overflow-hidden">
+            <div class="flex items-start justify-between gap-4 border-b border-base-300 p-4">
+                <div class="min-w-0">
+                    <h3 class="font-bold text-lg text-gray-900">បង្កាន់ដៃបង់ប្រាក់</h3>
+                    <p class="text-sm text-gray-500 truncate">
+                        {memberName(proofPreviewEnrollment)} · {proofPreviewEnrollment.course?.title || '-'}
+                    </p>
+                    <div class="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                        <span class="badge badge-sm {proofPreviewEnrollment.pricing_type === 'paid' ? 'badge-warning' : 'badge-success'}">{paymentLabel(proofPreviewEnrollment)}</span>
+                        {#if proofPreviewEnrollment.payment_reference}
+                            <span>Ref: {proofPreviewEnrollment.payment_reference}</span>
+                        {/if}
+                        {#if proofPreviewEnrollment.payment_submitted_at}
+                            <span>Submitted: {formatDate(proofPreviewEnrollment.payment_submitted_at)}</span>
+                        {/if}
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-circle btn-ghost" on:click={closeProofPreview} aria-label="បិទ">
+                    <XIcon class="w-4 h-4" />
+                </button>
+            </div>
+
+            <div class="bg-gray-100 min-h-[60vh] max-h-[75vh] overflow-auto p-4 flex items-center justify-center">
+                {#if isImageProof(proofPreviewEnrollment.payment_proof_url)}
+                    <img
+                        src={proofPreviewEnrollment.payment_proof_url}
+                        alt="Payment proof"
+                        class="max-w-full max-h-[70vh] object-contain rounded-lg shadow bg-white"
+                    />
+                {:else if isPdfProof(proofPreviewEnrollment.payment_proof_url)}
+                    <iframe
+                        src={proofPreviewEnrollment.payment_proof_url}
+                        title="Payment proof PDF"
+                        class="w-full h-[70vh] rounded-lg bg-white"
+                    ></iframe>
+                {:else}
+                    <div class="text-center space-y-3">
+                        <div class="font-bold text-gray-700">មិនអាច preview file type នេះបានទេ</div>
+                        <a href={proofPreviewEnrollment.payment_proof_url} target="_blank" rel="noreferrer" class="btn btn-info text-white">
+                            បើកក្នុង tab ថ្មី
+                        </a>
+                    </div>
+                {/if}
+            </div>
+
+            <div class="p-4 border-t border-base-300 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <div class="text-sm text-gray-600">
+                    {#if proofPreviewEnrollment.payment_note}
+                        <span class="font-bold">{noteLabel(proofPreviewEnrollment)}:</span> {proofPreviewEnrollment.payment_note}
+                    {:else}
+                        មិនមាន note
+                    {/if}
+                </div>
+                <div class="flex flex-wrap gap-2 justify-end">
+                    <a href={proofPreviewEnrollment.payment_proof_url} target="_blank" rel="noreferrer" class="btn btn-sm btn-outline">
+                        បើក tab ថ្មី
+                    </a>
+                    {#if proofPreviewEnrollment.status === 'pending_payment'}
+                        <button class="btn btn-sm btn-success text-white" on:click={() => updateEnrollment(proofPreviewEnrollment, 'approved')}>
+                            <CheckCircleIcon class="w-4 h-4" />
+                            Approve
+                        </button>
+                        <button class="btn btn-sm btn-error text-white" on:click={() => updateEnrollment(proofPreviewEnrollment, 'rejected')}>
+                            <XCircleIcon class="w-4 h-4" />
+                            Reject
+                        </button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+        <button class="modal-backdrop" on:click={closeProofPreview}>close</button>
+    </div>
+{/if}

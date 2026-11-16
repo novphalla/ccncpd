@@ -41,6 +41,7 @@
     let lessonsForPlayer = [];
     let showTutorialModal = false;
     let courseEnrollments = {};
+    let locallyRegisteredCourseIds = new Set();
     let enrollmentUserId = null;
     let couponInputs = {};
     let appliedCoupons = {};
@@ -58,6 +59,7 @@
     let inviteCodeInput = '';
     let inviteCodeMessage = '';
     let inviteCodeLoading = false;
+    let showPrivateAccessModal = false;
 
     const defaultProgramConfig = {
         access_mode: 'open_access',
@@ -99,7 +101,9 @@
         loadInviteUnlocks();
     }
 
-    $: visibleCourses = courses.filter(course => canViewCourse(course));
+    // Pass this object into template helpers so Svelte tracks enrollment changes.
+    $: enrollmentUiState = { enrollments: courseEnrollments, localIds: locallyRegisteredCourseIds };
+    $: visibleCourses = courses.filter(course => canViewCourse(course, enrollmentUiState));
 
     // Extract unique categories from visible courses
     $: categories = ['All', ...new Set(visibleCourses.map(c => c.category).filter(Boolean))];
@@ -155,10 +159,17 @@
         inviteCodeInput = String(value || '').replace(/\D/g, '').slice(0, 4);
     }
 
-    function canViewCourse(course) {
+    function canViewCourse(course, state = enrollmentUiState) {
         if (!isPrivateCourse(course)) return true;
         if (currentUser?.role === 'admin' || currentUser?.role === 'owner') return true;
-        return unlockedCourseIds.has(String(course.id)) || Boolean(courseEnrollment(course));
+        return unlockedCourseIds.has(String(course.id)) || Boolean(courseEnrollment(course, state));
+    }
+
+    function inviteApiHeaders(extra = {}) {
+        return {
+            'X-User-Id': currentUser?.id || '',
+            ...extra
+        };
     }
 
     function enrollmentStorageKey() {
@@ -173,18 +184,21 @@
         let data = null;
         let error = null;
         try {
-            const response = await fetch('/api/course-invite-codes?mode=unlocks');
-            data = await response.json().catch(() => ({}));
-            if (!response.ok) error = data;
-        } catch (requestError) {
-            error = requestError;
+            const res = await fetch('/api/course-invite-codes?mode=unlocks', {
+                headers: inviteApiHeaders(),
+                credentials: 'same-origin'
+            });
+            data = await res.json().catch(() => ({}));
+            if (!res.ok) error = data;
+        } catch (err) {
+            error = err;
         }
 
         if (error) {
             console.warn('Could not load invite unlocks:', error.message || error.error || error);
             return;
         }
-        unlockedCourseIds = new Set((data.unlocks || []).map(row => String(row.course_id)));
+        unlockedCourseIds = new Set((data?.unlocks || []).map(row => String(row.course_id)));
     }
 
     async function redeemInviteCode() {
@@ -201,15 +215,21 @@
 
         inviteCodeLoading = true;
         try {
-            const response = await fetch('/api/course-invite-codes', {
+            const res = await fetch('/api/course-invite-codes', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: inviteApiHeaders({ 'Content-Type': 'application/json' }),
+                credentials: 'same-origin',
                 body: JSON.stringify({ action: 'redeem', code })
             });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.error || 'Invalid invite code');
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                const err = new Error(data?.error || 'Invalid invite code');
+                err.code = data?.code || '';
+                err.status = res.status;
+                throw err;
+            }
 
-            const invite = data;
+            const invite = Array.isArray(data) ? data[0] : data;
             if (!invite?.course_id) {
                 inviteCodeMessage = 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានបិទ';
                 return;
@@ -217,6 +237,7 @@
 
             unlockedCourseIds = new Set([...unlockedCourseIds, String(invite.course_id)]);
             inviteCodeInput = '';
+            showPrivateAccessModal = false;
             showAllCourses = true;
             searchTerm = '';
             selectedCategory = 'All';
@@ -237,6 +258,10 @@
                 inviteCodeMessage = 'លេខកូដនេះផុតកំណត់ហើយ';
             } else if (message.includes('usage limit')) {
                 inviteCodeMessage = 'លេខកូដនេះប្រើគ្រប់ចំនួនកំណត់ហើយ';
+            } else if (error?.code === '42P10' || message.includes('unique or exclusion constraint') || message.includes('ON CONFLICT')) {
+                inviteCodeMessage = 'លេខកូដត្រឹមត្រូវ ប៉ុន្តែ Server/Supabase ខ្វះ unique constraint សម្រាប់រក្សាទុក។ សូមប្រាប់ Admin។';
+            } else if (error?.code === 'AUTH_SESSION_REQUIRED' || error?.status === 401 || message.includes('Unauthorized') || message.includes('Authentication session')) {
+                inviteCodeMessage = 'Session ចូលគណនីផុតកំណត់។ សូម Logout រួច Login ម្តងទៀត បន្ទាប់មកបញ្ចូលលេខកូដដដែល។';
             } else {
                 inviteCodeMessage = 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានបិទ';
             }
@@ -275,6 +300,12 @@
                         delete synced[String(course.id)];
                     });
                 saveCourseEnrollments({ ...synced, ...fromDb });
+                locallyRegisteredCourseIds = new Set([
+                    ...locallyRegisteredCourseIds,
+                    ...Object.entries(fromDb)
+                        .filter(([, row]) => row?.status === 'registered' || row?.status === 'approved')
+                        .map(([courseId]) => courseId)
+                ]);
             } else if (error && error.code !== '42P01' && error.code !== 'PGRST205') {
                 console.warn('Could not load course enrollments:', error.message);
             }
@@ -289,16 +320,16 @@
         }
     }
 
-    function courseEnrollment(course) {
-        return courseEnrollments[String(course.id)] || null;
+    function courseEnrollment(course, state = enrollmentUiState) {
+        return state?.enrollments?.[String(course.id)] || null;
     }
 
     function isCouponLoading(course) {
         return couponLoading[String(course.id)] === true;
     }
 
-    function isCourseRegistrationLoading(course) {
-        return courseRegistrationLoading[String(course.id)] === true;
+    function isCourseRegistrationLoading(course, state = courseRegistrationLoading) {
+        return state[String(course.id)] === true;
     }
 
     function setCourseRegistrationLoading(course, value) {
@@ -315,25 +346,26 @@
         };
     }
 
-    function courseActionMessage(course) {
-        return courseActionMessages[String(course.id)] || null;
+    function courseActionMessage(course, messages = courseActionMessages) {
+        return messages[String(course.id)] || null;
     }
 
-    function courseEnrollmentStatus(course) {
-        return courseEnrollment(course)?.status || null;
+    function courseEnrollmentStatus(course, state = enrollmentUiState) {
+        return courseEnrollment(course, state)?.status || null;
     }
 
     function isProgramEnrollmentCourse(course) {
         return programConfigFor(course).access_mode === 'program_enrollment';
     }
 
-    function isCourseRegistered(course) {
-        const status = courseEnrollmentStatus(course);
+    function isCourseRegistered(course, state = enrollmentUiState) {
+        if (state?.localIds?.has(String(course.id))) return true;
+        const status = courseEnrollmentStatus(course, state);
         return status === 'registered' || status === 'approved';
     }
 
-    function isCoursePendingPayment(course) {
-        return courseEnrollmentStatus(course) === 'pending_payment';
+    function isCoursePendingPayment(course, state = enrollmentUiState) {
+        return courseEnrollmentStatus(course, state) === 'pending_payment';
     }
 
     function isCourseRegistrationClosed(course) {
@@ -354,8 +386,8 @@
         return startAt && now < startAt;
     }
 
-    function isCourseRegistrationRequired(course) {
-        return isProgramEnrollmentCourse(course) && !isCourseRegistered(course);
+    function isCourseRegistrationRequired(course, state = enrollmentUiState) {
+        return isProgramEnrollmentCourse(course) && !isCourseRegistered(course, state);
     }
 
     function formatProgramPrice(program) {
@@ -588,7 +620,10 @@
         const autoApprovedPayment = isPaid && !needsPayment;
         const status = needsPayment ? 'pending_payment' : autoApprovedPayment ? 'approved' : 'registered';
         const paymentReference = needsPayment ? generatePaymentReference(course) : null;
+        const registeredAt = new Date().toISOString();
         const enrollment = {
+            course_id: course.id,
+            user_id: currentUser.id,
             status,
             pricing_type: program.pricing_type,
             price: finalPrice,
@@ -601,22 +636,30 @@
             coupon_code: coupon?.code || null,
             payment_reference: paymentReference,
             payment_provider: isPaid ? (program.payment_provider || 'manual_qr') : null,
-            approved_at: autoApprovedPayment ? new Date().toISOString() : null,
-            registered_at: new Date().toISOString()
+            approved_at: autoApprovedPayment ? registeredAt : null,
+            registered_at: registeredAt,
+            updated_at: registeredAt
         };
 
+        const localEnrollment = { ...enrollment };
         const next = {
             ...courseEnrollments,
-            [String(course.id)]: enrollment
+            [String(course.id)]: localEnrollment
         };
+
+        locallyRegisteredCourseIds = new Set([...locallyRegisteredCourseIds, String(course.id)]);
+
 
         setCourseRegistrationLoading(course, true);
         saveCourseEnrollments(next);
-        setCourseActionMessage(course, 'បានចុះឈ្មោះរួច កំពុងរក្សាទុកទៅ Server...', 'info');
+        setCourseActionMessage(course, 'កំពុងចុះឈ្មោះ...', 'info');
         await tick();
 
+        // Reflect registration immediately in the UI while persisting to the server.
+        setCourseRegistrationLoading(course, false);
+
         if (status === 'pending_payment') {
-            setCourseActionMessage(course, 'បានចុះឈ្មោះរួច សូមបង់ប្រាក់ និង upload បង្កាន់ដៃ', 'success');
+            setCourseActionMessage(course, 'បានចុះឈ្មោះរួច សូមបង់ប្រាក់ទៅ Admin និង upload បង្កាន់ដៃ', 'success');
             openPaymentModal(course);
         }
 
@@ -630,15 +673,22 @@
         setCourseRegistrationLoading(course, false);
 
         if (!saved) {
+            locallyRegisteredCourseIds = new Set([...locallyRegisteredCourseIds].filter(id => id !== String(course.id)));
             setCourseActionMessage(course, 'បានបង្ហាញថាចុះឈ្មោះរួចក្នុងទូរស័ព្ទនេះ ប៉ុន្តែមិនទាន់រក្សាទុកទៅ Server។ សូមពិនិត្យ internet ឬប្រាប់ Admin។', 'warning');
             return;
         }
+
+        saveCourseEnrollments({
+            ...courseEnrollments,
+            [String(course.id)]: { ...enrollment }
+        });
+        await tick();
 
         if (status === 'pending_payment') return;
         if (autoApprovedPayment) {
             setCourseActionMessage(course, `បានចុះឈ្មោះ និង approve ការបង់ប្រាក់រួចរាល់។${discountAmount > 0 ? ` បញ្ចុះតម្លៃ: ${formatMoney(discountAmount, program.currency)}` : ''}`, 'success');
         } else {
-            setCourseActionMessage(course, 'បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរៀនបាននៅពេលដល់ថ្ងៃរៀន។', 'success');
+            setCourseActionMessage(course, 'បានចុះឈ្មោះជោគជ័យ។ អ្នកអាចចូលរួមបាននៅពេលកំណត់។', 'success');
         }
     }
 
@@ -725,6 +775,12 @@
                 return alert("សូមធ្វើតេស្តបញ្ចប់ (Post-test) ជាមុនសិន។");
             }
             if (course.lessons_enabled === false) {
+                const liveMeeting = nextCourseMeetingFor(course);
+                if (liveMeeting) {
+                    // Live-only programs use the meeting control shown on the card.
+                    if (isJoinAvailable(liveMeeting)) openCourseMeeting(liveMeeting);
+                    return;
+                }
                 logAccessAttempt(course.id, 'lessons_disabled');
                 return alert("មេរៀនត្រូវបានបិទ។");
             }
@@ -770,8 +826,8 @@
         showLessonPlayer = true;
     }
 
-    function isLocked(course) {
-        if (isCourseRegistrationRequired(course)) return true;
+    function isLocked(course, state = enrollmentUiState) {
+        if (isCourseRegistrationRequired(course, state)) return true;
         if (isProgramEnrollmentCourse(course) && isLearningTimeLocked(course)) return true;
         if (course.has_pre_test && !preTestDoneCourses.includes(String(course.id))) return true;
         if (course.has_pre_test && !postTestAttemptedCourses.includes(String(course.id))) return true;
@@ -795,7 +851,6 @@
         course={selectedCourseForPlayer} 
         lesson={lessonForPlayer}
         lessons={lessonsForPlayer}
-        supabase={supabase}
         currentUser={currentUser}
         on:close={() => showLessonPlayer = false}
     />
@@ -840,6 +895,19 @@
                 </div>
             </button>
             <div class="flex gap-1">
+                <button
+                    class="rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none text-blue-700"
+                    on:click={() => { inviteCodeMessage = ''; showPrivateAccessModal = true; }}
+                    aria-label="បញ្ចូលកូដវគ្គឯកជន"
+                    title="បញ្ចូលកូដវគ្គឯកជន"
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="h-4.5 w-4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="8" cy="15" r="4"></circle>
+                        <path d="m11 12 8-8"></path>
+                        <path d="m17 6 2 2"></path>
+                        <path d="m14 9 2 2"></path>
+                    </svg>
+                </button>
                 <button class="rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none" on:click={() => dispatch('toggleLanguage')}>
                     <img src={currentLang === 'km' ? 'https://flagcdn.com/w40/kh.png' : 'https://flagcdn.com/w40/gb.png'} alt="Language" class="w-6 h-6 object-cover rounded-full" on:error={(e) => e.target.style.display = 'none'} />
                     <span class="text-xs font-bold hidden" style="display: none;">{currentLang === 'km' ? 'KH' : 'EN'}</span>
@@ -880,32 +948,69 @@
             </a>
         {/if}
 
-        <div class="bg-white border border-blue-100 rounded-2xl p-3 shadow-sm">
-            <div class="flex flex-col sm:flex-row sm:items-center gap-2">
-                <div class="flex-1 min-w-0">
-                    <div class="text-sm font-black text-gray-800">មានលេខកូដវគ្គសិក្សា?</div>
-                    <div class="text-xs text-gray-500 mt-0.5">បញ្ចូលលេខកូដដើម្បីបើកវគ្គ private</div>
-                </div>
-                <div class="flex gap-2 w-full sm:w-auto">
-                    <input
-                        value={inviteCodeInput}
-                        on:input={(e) => updateInviteCodeInput(e.target.value)}
-                        on:keydown={(e) => e.key === 'Enter' && redeemInviteCode()}
-                        inputmode="numeric"
-                        pattern="[0-9]*"
-                        maxlength="4"
-                        class="input input-sm input-bordered bg-white flex-1 sm:w-40 font-mono text-lg tracking-widest"
-                        placeholder="1234"
-                    />
-                    <button class="btn btn-sm btn-primary" on:click={redeemInviteCode} disabled={inviteCodeLoading}>
-                        {inviteCodeLoading ? '...' : 'បើកវគ្គ'}
-                    </button>
+        {#if inviteCodeMessage}
+            <div role="status" class="rounded-xl border px-3 py-2 text-xs font-bold {inviteCodeMessage.startsWith('បាន') ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'}">
+                {inviteCodeMessage}
+            </div>
+        {/if}
+
+        {#if showPrivateAccessModal}
+            <div class="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/55 p-4" role="dialog" aria-modal="true" aria-labelledby="private-course-code-title" in:fade={{ duration: 150 }} out:fade={{ duration: 120 }}>
+                <div class="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" in:scale={{ start: 0.96, duration: 160 }} out:scale={{ start: 0.98, duration: 100 }}>
+                    <div class="flex items-start gap-3">
+                        <div class="flex h-12 w-12 flex-none items-center justify-center rounded-xl bg-blue-50 text-blue-700">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="8" cy="15" r="4"></circle>
+                                <path d="m11 12 8-8"></path>
+                                <path d="m17 6 2 2"></path>
+                                <path d="m14 9 2 2"></path>
+                            </svg>
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <h2 id="private-course-code-title" class="text-lg font-black leading-tight text-gray-900">បញ្ចូលកូដវគ្គឯកជន</h2>
+                            <p class="mt-1 text-sm font-semibold leading-snug text-gray-500">ប្រើតែកូដវគ្គដែល Admin ផ្ញើឱ្យ។ លេខកូដចូលគណនីប្រើនៅទំព័រ Login ប៉ុណ្ណោះ។</p>
+                        </div>
+                        <button
+                            type="button"
+                            class="btn btn-ghost btn-sm btn-circle"
+                            aria-label="បិទ"
+                            on:click={() => showPrivateAccessModal = false}
+                        >
+                            x
+                        </button>
+                    </div>
+
+                    <form class="mt-5 space-y-3" on:submit|preventDefault={redeemInviteCode}>
+                        <label for="private-course-code" class="text-sm font-black text-gray-700">កូដវគ្គ 4 ខ្ទង់</label>
+                        <input
+                            id="private-course-code"
+                            value={inviteCodeInput}
+                            on:input={(e) => updateInviteCodeInput(e.target.value)}
+                            inputmode="numeric"
+                            pattern="[0-9]*"
+                            maxlength="4"
+                            autocomplete="off"
+                            class="input h-16 min-h-16 w-full rounded-xl border-gray-200 bg-white px-4 text-center font-mono text-3xl font-black tracking-[0.32em] text-slate-800 shadow-sm focus:border-blue-400 focus:outline-none"
+                            placeholder=""
+                        />
+
+                        {#if inviteCodeMessage}
+                            <div role="status" class="rounded-xl border px-3 py-2 text-sm font-bold {inviteCodeMessage.startsWith('បាន') ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'}">
+                                {inviteCodeMessage}
+                            </div>
+                        {/if}
+
+                        <button type="submit" class="btn btn-primary h-12 min-h-12 w-full rounded-xl text-base font-black" disabled={inviteCodeLoading || inviteCodeInput.length !== 4}>
+                            {#if inviteCodeLoading}
+                                <span class="loading loading-spinner loading-sm"></span>
+                            {:else}
+                                បើកវគ្គឯកជន
+                            {/if}
+                        </button>
+                    </form>
                 </div>
             </div>
-            {#if inviteCodeMessage}
-                <div class="text-xs mt-2 {inviteCodeMessage.startsWith('បាន') ? 'text-success' : 'text-error'}">{inviteCodeMessage}</div>
-            {/if}
-        </div>
+        {/if}
 
         <!-- Courses Section -->
         <div>
@@ -966,7 +1071,7 @@
                             {/if}
                             
                             <!-- Lock Overlay -->
-                            {#if isLocked(course)}
+                            {#if isLocked(course, enrollmentUiState)}
                                 <div class="absolute inset-0 bg-black/40 flex items-center justify-center z-10">
                                     <div class="bg-white p-3 rounded-full shadow-lg">
                                         <span class="text-3xl drop-shadow-md">🔒</span>
@@ -991,13 +1096,13 @@
                                         {course.category}
                                     </div>
                                 {/if}
-                                {#if isProgramEnrollmentCourse(course)}
-                                    <div class="badge {isCourseRegistrationLoading(course) ? 'badge-info text-white' : isCourseRegistered(course) ? 'badge-success text-white' : isCoursePendingPayment(course) ? 'badge-warning' : 'badge-primary'} text-xs shadow-sm border-none">
-                                        {#if isCourseRegistrationLoading(course)}
-                                            កំពុងរក្សាទុក...
-                                        {:else if isCourseRegistered(course)}
+                                {#if isProgramEnrollmentCourse(course) && (!isCourseRegistered(course, enrollmentUiState) || isCourseRegistrationLoading(course, courseRegistrationLoading))}
+                                    <div class="badge {isCourseRegistrationLoading(course, courseRegistrationLoading) ? 'badge-info text-white' : isCourseRegistered(course, enrollmentUiState) ? 'badge-success text-white' : isCoursePendingPayment(course, enrollmentUiState) ? 'badge-warning' : 'badge-primary'} text-xs shadow-sm border-none">
+                                        {#if isCourseRegistrationLoading(course, courseRegistrationLoading)}
+                                            កំពុងចុះឈ្មោះ...
+                                        {:else if isCourseRegistered(course, enrollmentUiState)}
                                             បានចុះឈ្មោះ
-                                        {:else if isCoursePendingPayment(course)}
+                                        {:else if isCoursePendingPayment(course, enrollmentUiState)}
                                             រង់ចាំ approve
                                         {:else if program.pricing_type === 'paid'}
                                             {formatProgramPrice(program)}
@@ -1019,6 +1124,12 @@
                             </div>
                             <p class="text-xs text-base-content line-clamp-2 mb-4 h-8">{course.description || t('no_description')}</p>
 
+                            {#if isProgramEnrollmentCourse(course) && isCourseRegistered(course, enrollmentUiState)}
+                                <div class="mb-3 w-full rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-center text-xs font-bold text-green-700">
+                                    ✓ អ្នកបានចុះឈ្មោះរួចហើយ
+                                </div>
+                            {/if}
+
                             {#if courseMeeting}
                                 <div class="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 mb-3 text-xs text-blue-900">
                                     <div class="font-bold flex items-center justify-between gap-2">
@@ -1033,15 +1144,15 @@
                             {/if}
                             
                             <div class="card-actions flex-col gap-2 mt-auto">
-                                {#if courseActionMessage(course)}
-                                    {@const actionMsg = courseActionMessage(course)}
+                                {#if courseActionMessage(course, courseActionMessages)}
+                                    {@const actionMsg = courseActionMessage(course, courseActionMessages)}
                                     <div class="w-full rounded-xl border px-3 py-2 text-xs font-bold text-center
                                         {actionMsg.type === 'success' ? 'bg-green-50 border-green-200 text-green-700' : actionMsg.type === 'warning' ? 'bg-yellow-50 border-yellow-200 text-yellow-700' : 'bg-blue-50 border-blue-200 text-blue-700'}">
                                         {actionMsg.message}
                                     </div>
                                 {/if}
 
-                                {#if courseMeeting && !isCourseRegistrationRequired(course) && !(isProgramEnrollmentCourse(course) && isLearningTimeLocked(course))}
+                                {#if courseMeeting && !isCourseRegistrationRequired(course, enrollmentUiState) && !(isProgramEnrollmentCourse(course) && isLearningTimeLocked(course))}
                                     <div class="w-full relative z-10" on:click|stopPropagation>
                                         {#if isJoinAvailable(courseMeeting)}
                                             <button class="btn btn-success btn-sm w-full text-white shadow-md shadow-success/20" on:click={() => openCourseMeeting(courseMeeting)} disabled={!courseMeeting.meeting_url}>
@@ -1050,22 +1161,22 @@
                                         {:else if meetingCountdowns[courseMeeting.id]}
                                             {@const cd = meetingCountdowns[courseMeeting.id]}
                                             <button class="btn btn-outline btn-sm w-full bg-gray-100 text-gray-500 border-gray-300" disabled>
-                                                🔒 ចូលរៀនបាននៅ {String(cd.days).padStart(2,'0')}ថ្ងៃ {String(cd.hours).padStart(2,'0')}ម៉ោង {String(cd.minutes).padStart(2,'0')}នាទី
+                                                🔒 ចូលរួមបាននៅ {String(cd.days).padStart(2,'0')}ថ្ងៃ {String(cd.hours).padStart(2,'0')}ម៉ោង {String(cd.minutes).padStart(2,'0')}នាទី
                                             </button>
                                         {/if}
                                     </div>
                                 {/if}
-                                {#if isCourseRegistrationRequired(course)}
+                                {#if isCourseRegistrationRequired(course, enrollmentUiState)}
                                     <div class="w-full relative z-10" on:click|stopPropagation>
-                                        {#if isCoursePendingPayment(course)}
+                                        {#if isCoursePendingPayment(course, enrollmentUiState)}
                                             <button class="btn btn-warning btn-sm w-full text-white" on:click={() => openPaymentModal(course)}>
-                                                {courseEnrollment(course)?.payment_proof_url ? '📤 មើល QR / ផ្ញើបង្កាន់ដៃម្ដងទៀត' : '💳 បង់ប្រាក់ / Upload បង្កាន់ដៃ'}
+                                                {courseEnrollment(course, enrollmentUiState)?.payment_proof_url ? '📤 មើល QR / ផ្ញើបង្កាន់ដៃម្ដងទៀត' : '💳 បង់ប្រាក់ / Upload បង្កាន់ដៃ'}
                                             </button>
                                             <p class="text-[11px] text-warning mt-1 text-center">
-                                                {#if isCourseRegistrationLoading(course)}
-                                                    កំពុងរក្សាទុកទៅ Server...
+                                                {#if isCourseRegistrationLoading(course, courseRegistrationLoading)}
+                                                    កំពុងចុះឈ្មោះ...
                                                 {:else}
-                                                    {courseEnrollment(course)?.payment_proof_url ? 'បានផ្ញើបង្កាន់ដៃរួច សូមរង់ចាំការអនុម័ត' : 'ស្កេន QR ហើយ upload បង្កាន់ដៃ'}
+                                                    {courseEnrollment(course, enrollmentUiState)?.payment_proof_url ? 'បានផ្ញើបង្កាន់ដៃរួច សូមរង់ចាំការអនុម័ត' : 'ស្កេន QR ហើយ upload បង្កាន់ដៃ'}
                                                 {/if}
                                             </p>
                                         {:else if isCourseRegistrationClosed(course)}
@@ -1103,8 +1214,8 @@
                                                     {/if}
                                                 </div>
                                             {/if}
-                                            <button class="btn btn-primary btn-sm w-full shadow-md shadow-primary/20" on:click={() => handleCourseRegistration(course)} disabled={isCourseRegistrationLoading(course)}>
-                                                {isCourseRegistrationLoading(course) ? 'កំពុងចុះឈ្មោះ...' : program.pricing_type === 'paid' ? `ចុះឈ្មោះ និងបង់ ${formatMoney(finalPriceFor(course, program), program.currency)}` : 'ចុះឈ្មោះ Free'}
+                                            <button class="btn btn-primary btn-sm w-full shadow-md shadow-primary/20" on:click={() => handleCourseRegistration(course)} disabled={isCourseRegistrationLoading(course, courseRegistrationLoading)}>
+                                                {isCourseRegistrationLoading(course, courseRegistrationLoading) ? 'កំពុងចុះឈ្មោះ...' : program.pricing_type === 'paid' ? `ចុះឈ្មោះ និងបង់ ${formatMoney(finalPriceFor(course, program), program.currency)}` : 'ចុះឈ្មោះ Free'}
                                             </button>
                                         {/if}
                                     </div>
@@ -1126,7 +1237,11 @@
                                     </div>
                                 {:else}
                                     <!-- បង្ហាញមេរៀន និង Post-test -->
-                                    {#if course.lessons_enabled === false}
+                                    {#if course.lessons_enabled === false && courseMeeting}
+                                        <button type="button" disabled class="w-full rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-center text-xs font-bold text-sky-800 opacity-100">
+                                            វគ្គនេះមិនទាន់មានមេរៀនសុំរង់ចាំ
+                                        </button>
+                                    {:else if course.lessons_enabled === false}
                                         <div class="w-full" on:click|stopPropagation>
                                             <button class="btn btn-outline btn-sm w-full bg-gray-100 text-gray-400 border-gray-300" disabled>
                                                 {t('lessons_disabled')}
