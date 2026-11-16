@@ -39,6 +39,13 @@
     let selectedCourseForPlayer = null;
     let lessonForPlayer = null; // To hold the specific lesson to play
     let lessonsForPlayer = [];
+    let LessonDiscussionComponent = null;
+    let discussionCourse = null;
+    let discussionLesson = null;
+    let discussionLessons = [];
+    let discussionLoading = false;
+    let showDiscussionPicker = false;
+    let showStandaloneDiscussion = false;
     let showTutorialModal = false;
     let courseEnrollments = {};
     let locallyRegisteredCourseIds = new Set();
@@ -826,6 +833,67 @@
         showLessonPlayer = true;
     }
 
+    function closeStandaloneDiscussion() {
+        showStandaloneDiscussion = false;
+        showDiscussionPicker = false;
+        discussionCourse = null;
+        discussionLesson = null;
+        discussionLessons = [];
+    }
+
+    function selectDiscussionLesson(lesson) {
+        discussionLesson = lesson;
+        showDiscussionPicker = false;
+        showStandaloneDiscussion = true;
+    }
+
+    async function openCourseDiscussion(course) {
+        if (discussionLoading) return;
+
+        discussionLoading = true;
+        discussionCourse = course;
+
+        try {
+            const [discussionModule, lessonsResult] = await Promise.all([
+                LessonDiscussionComponent
+                    ? Promise.resolve({ default: LessonDiscussionComponent })
+                    : import('./LessonDiscussion.svelte'),
+                supabase
+                    .from('lessons')
+                    .select('id, course_id, title, sort_order')
+                    .eq('course_id', course.id)
+                    .order('sort_order', { ascending: true })
+            ]);
+
+            LessonDiscussionComponent = discussionModule.default;
+
+            if (lessonsResult.error) {
+                throw lessonsResult.error;
+            }
+
+            discussionLessons = lessonsResult.data || [];
+
+            if (discussionLessons.length === 0) {
+                alert('វគ្គនេះមិនទាន់មានមេរៀនសម្រាប់ការពិភាក្សាទេ។');
+                closeStandaloneDiscussion();
+                return;
+            }
+
+            if (discussionLessons.length === 1) {
+                selectDiscussionLesson(discussionLessons[0]);
+                return;
+            }
+
+            showDiscussionPicker = true;
+        } catch (error) {
+            console.error('Error loading discussion lessons:', error);
+            alert('មិនអាចបើកការពិភាក្សាបានទេ។ សូមព្យាយាមម្ដងទៀត។');
+            closeStandaloneDiscussion();
+        } finally {
+            discussionLoading = false;
+        }
+    }
+
     function isLocked(course, state = enrollmentUiState) {
         if (isCourseRegistrationRequired(course, state)) return true;
         if (isProgramEnrollmentCourse(course) && isLearningTimeLocked(course)) return true;
@@ -1251,6 +1319,13 @@
                                         <button class="btn btn-primary btn-sm w-full shadow-md shadow-primary/20 relative z-10" on:click|stopPropagation={() => handleCourseClick(course)}>
                                             {t('start_lesson')}
                                         </button>
+                                        <button
+                                            class="btn btn-outline btn-sm w-full border-teal-600 text-teal-700 hover:bg-teal-50 relative z-10"
+                                            on:click|stopPropagation={() => openCourseDiscussion(course)}
+                                            disabled={discussionLoading && discussionCourse?.id === course.id}
+                                        >
+                                            {discussionLoading && discussionCourse?.id === course.id ? 'កំពុងបើក...' : '💬 ពិភាក្សាមេរៀន'}
+                                        </button>
                                     {/if}
                                     <div class="w-full">
                                         {#if isPassed(course.id)}
@@ -1356,6 +1431,53 @@
 
 <!-- Tutorial Modal -->
 <TutorialModal bind:show={showTutorialModal} {tutorials} />
+
+{#if showDiscussionPicker && discussionCourse}
+    <div class="modal modal-open z-[90]">
+        <div class="modal-box w-11/12 max-w-lg bg-white rounded-2xl p-0 overflow-hidden">
+            <div class="border-b border-gray-200 bg-teal-50 p-5">
+                <div class="flex items-start justify-between gap-4">
+                    <div>
+                        <div class="text-xs font-bold uppercase tracking-wide text-teal-700">ការពិភាក្សា</div>
+                        <h3 class="mt-1 text-lg font-black text-gray-900">ជ្រើសរើសមេរៀន</h3>
+                        <p class="mt-1 text-xs text-gray-600 line-clamp-2">{discussionCourse.title}</p>
+                    </div>
+                    <button class="btn btn-sm btn-circle btn-ghost" on:click={closeStandaloneDiscussion} aria-label="បិទ">✕</button>
+                </div>
+            </div>
+            <div class="max-h-[60vh] overflow-y-auto p-4 space-y-2">
+                {#each discussionLessons as lesson, index (lesson.id)}
+                    <button
+                        class="btn h-auto min-h-14 w-full justify-start border border-gray-200 bg-white px-4 py-3 text-left text-gray-800 hover:border-teal-500 hover:bg-teal-50"
+                        on:click={() => selectDiscussionLesson(lesson)}
+                    >
+                        <span class="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal-100 text-sm font-black text-teal-700">{index + 1}</span>
+                        <span class="min-w-0 flex-1 whitespace-normal font-bold">{lesson.title || `មេរៀនទី ${index + 1}`}</span>
+                        <span class="text-teal-700">💬</span>
+                    </button>
+                {/each}
+            </div>
+        </div>
+        <button class="modal-backdrop" on:click={closeStandaloneDiscussion} aria-label="បិទការជ្រើសរើសមេរៀន">close</button>
+    </div>
+{/if}
+
+{#if showStandaloneDiscussion && LessonDiscussionComponent && discussionCourse && discussionLesson}
+    <div class="fixed inset-0 z-[90]">
+        <button
+            class="absolute inset-0 border-0 bg-slate-950/35"
+            on:click={closeStandaloneDiscussion}
+            aria-label="បិទការពិភាក្សា"
+        ></button>
+        <svelte:component
+            this={LessonDiscussionComponent}
+            lesson={discussionLesson}
+            course={discussionCourse}
+            currentUser={currentUser}
+            on:close={closeStandaloneDiscussion}
+        />
+    </div>
+{/if}
 
 {#if showPaymentModal && selectedPaymentCourse}
     {@const paymentProgram = programConfigFor(selectedPaymentCourse)}
