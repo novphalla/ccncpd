@@ -16,12 +16,14 @@
         FileQuestionIcon,
         ListIcon,
         LoaderCircleIcon,
+        MessageCircleIcon,
         Maximize2Icon,
         Minimize2Icon,
         XIcon,
         ZoomInIcon,
         ZoomOutIcon
     } from 'lucide-svelte';
+    import LessonDiscussion from '$lib/Components/LessonDiscussion.svelte';
 
     export let course = { title: 'ចំណងជើងវគ្គសិក្សា' };
     export let lesson = { title: 'មេរៀនទី ១', duration: '10:00' };
@@ -38,6 +40,8 @@
     let showControls = true;
     let hideControlsTimeout;
     let showToc = false;
+    let showDiscussion = false;
+    let discussionCount = 0;
     let canvas;
     let resumeToastMessage = '';
     let resumeToastTimeout;
@@ -90,6 +94,7 @@
         downloadProgress = 0;
         isCompleted = false;
         resumeToastMessage = '';
+        discussionCount = 0;
         clearTimeout(resumeToastTimeout);
     }
 
@@ -570,6 +575,20 @@
                 </button>
 
                 <button
+                    on:click={() => showDiscussion = !showDiscussion}
+                    class:reader-icon-button-active={showDiscussion}
+                    class="reader-icon-button relative"
+                    aria-label="ការពិភាក្សាមេរៀន"
+                    aria-pressed={showDiscussion}
+                    title="ការពិភាក្សាមេរៀន"
+                >
+                    <MessageCircleIcon size={19} />
+                    {#if discussionCount > 0}
+                        <span class="discussion-count">{discussionCount > 99 ? '99+' : discussionCount}</span>
+                    {/if}
+                </button>
+
+                <button
                     on:click={toggleFullScreen}
                     class="reader-icon-button hidden sm:flex"
                     aria-label={isFullScreen ? 'ចាកចេញពីពេញអេក្រង់' : 'ពេញអេក្រង់'}
@@ -661,6 +680,21 @@
                     {/each}
                 </nav>
             </aside>
+        {/if}
+
+        {#if showDiscussion}
+            <button
+                class="discussion-backdrop absolute inset-0 z-40"
+                on:click={() => showDiscussion = false}
+                aria-label="បិទការពិភាក្សា"
+            ></button>
+            <LessonDiscussion
+                {lesson}
+                {course}
+                {currentUser}
+                on:close={() => showDiscussion = false}
+                on:count={(event) => discussionCount = event.detail}
+            />
         {/if}
 
         <main class="flex min-w-0 flex-1 flex-col overflow-hidden" on:mousemove={handleMouseMove}>
@@ -854,6 +888,28 @@
         border-color: #0f766e;
         background: #e6f5f3;
         color: #0f766e;
+    }
+
+    .discussion-count {
+        position: absolute;
+        right: -0.25rem;
+        top: -0.3rem;
+        min-width: 1.15rem;
+        height: 1.15rem;
+        padding: 0 0.2rem;
+        border: 2px solid #ffffff;
+        border-radius: 999px;
+        background: #dc2626;
+        color: #ffffff;
+        font-size: 0.58rem;
+        font-weight: 800;
+        line-height: 0.95rem;
+        text-align: center;
+    }
+
+    .discussion-backdrop {
+        border: 0;
+        background: rgba(15, 23, 42, 0.32);
     }
 
     .download-button {
