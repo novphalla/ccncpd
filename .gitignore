@@ -7,6 +7,11 @@ node_modules
 .wrangler
 /.svelte-kit
 /build
+/artifacts
+
+# Local diagnostic files
+/test_db.js
+/check_cols.sql
 
 # OS
 .DS_Store
@@ -21,5 +26,3 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
-
-.vercel

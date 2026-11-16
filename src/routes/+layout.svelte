@@ -2,13 +2,66 @@
   import "../app.css";
   import { QueryClient, QueryClientProvider } from '@tanstack/svelte-query';
   import { page } from '$app/stores';
+  import { dev } from '$app/environment';
   import "@fontsource/siemreap";
   import { onMount } from 'svelte';
 
   onMount(() => {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    let reloadingForUpdate = false;
+    const versionKey = 'ccn_app_version';
+
+    async function checkAppVersion() {
+      try {
+        const response = await fetch('/_app/version.json', { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        const version = data?.version;
+        if (!version) return;
+
+        const storedVersion = localStorage.getItem(versionKey);
+        if (storedVersion && storedVersion !== version) {
+          localStorage.setItem(versionKey, version);
+          if (!reloadingForUpdate) {
+            reloadingForUpdate = true;
+            window.location.reload();
+          }
+          return;
+        }
+
+        localStorage.setItem(versionKey, version);
+      } catch {
+        // Version checks are best-effort; the app should keep working offline or on weak mobile data.
+      }
     }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+        .then((registration) => registration.update().catch(() => {}))
+        .catch(() => {});
+
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloadingForUpdate) return;
+        reloadingForUpdate = true;
+        window.location.reload();
+      });
+    }
+
+    if (dev) return;
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) checkAppVersion();
+    };
+
+    checkAppVersion();
+    const versionInterval = setInterval(checkAppVersion, 60 * 1000);
+    window.addEventListener('focus', checkAppVersion);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(versionInterval);
+      window.removeEventListener('focus', checkAppVersion);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   });
 
   // @ts-ignore
@@ -48,7 +101,9 @@
                 src="/ccn-logo.png" 
                 alt="CCN Logo" 
                 class="h-16 w-16 bg-white rounded-full p-1 shadow-sm"
-                onerror="this.src='https://ui-avatars.com/api/?name=CCN&background=fff&color=0056b3'"
+                on:error={(event) => {
+                    event.currentTarget.src = 'https://ui-avatars.com/api/?name=CCN&background=fff&color=0056b3';
+                }}
             />
             
             <!-- អក្សរចំណងជើង -->
