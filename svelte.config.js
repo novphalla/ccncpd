@@ -14,7 +14,7 @@ const config = {
 			}
 		}),
 		csrf: {
-			checkOrigin: false
+			trustedOrigins: ['*']
 		}
 	}
 };
