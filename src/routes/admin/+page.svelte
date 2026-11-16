@@ -19,7 +19,7 @@
     let loginBgUrl = '';
     let loginLogoUrl = '';
     let faviconUrl = '';
-    const version = '1.0.0';
+    const version = '1.0.1';
 
     onMount(async () => {
         // ពិនិត្យសិទ្ធិ Admin
