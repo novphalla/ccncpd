@@ -14,6 +14,7 @@
     export let lesson;
     export let course;
     export let currentUser;
+    export let focusCommentId = null;
 
     const dispatch = createEventDispatcher();
     let comments = [];
@@ -98,6 +99,13 @@
             errorMessage = '';
             dispatch('count', comments.filter(comment => comment.status === 'visible').length);
             await markCommentsRead();
+            if (focusCommentId) {
+                await tick();
+                document.querySelector(`[data-comment-id="${focusCommentId}"]`)?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+            }
         } catch (error) {
             errorMessage = error.message || 'មិនអាចទាញយកមតិបានទេ។';
         } finally {
@@ -337,23 +345,27 @@
             </div>
         {:else}
             {#each topLevelComments as comment (comment.id)}
-                <LessonCommentItem
-                    {comment}
-                    on:reply={beginReply}
-                    on:edit={editComment}
-                    on:delete={deleteComment}
-                    on:report={beginReport}
-                    on:moderate={moderateComment}
-                />
-                {#each repliesFor(comment.id) as reply (reply.id)}
+                <div data-comment-id={comment.id} class:focused-comment={focusCommentId === comment.id}>
                     <LessonCommentItem
-                        comment={reply}
-                        depth={1}
+                        {comment}
+                        on:reply={beginReply}
                         on:edit={editComment}
                         on:delete={deleteComment}
                         on:report={beginReport}
                         on:moderate={moderateComment}
                     />
+                </div>
+                {#each repliesFor(comment.id) as reply (reply.id)}
+                    <div data-comment-id={reply.id} class:focused-comment={focusCommentId === reply.id}>
+                        <LessonCommentItem
+                            comment={reply}
+                            depth={1}
+                            on:edit={editComment}
+                            on:delete={deleteComment}
+                            on:report={beginReport}
+                            on:moderate={moderateComment}
+                        />
+                    </div>
                 {/each}
             {/each}
         {/if}
@@ -468,6 +480,11 @@
     .error-banner button { border: 0; background: transparent; color: inherit; }
 
     .discussion-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 0.8rem; }
+    .focused-comment { border-radius: 0.75rem; animation: comment-focus 2.5s ease-out; }
+    @keyframes comment-focus {
+        0%, 35% { background: #fef3c7; box-shadow: 0 0 0 3px #f59e0b; }
+        100% { background: transparent; box-shadow: 0 0 0 0 transparent; }
+    }
     .empty-state { min-height: 12rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4rem; color: #94a3b8; text-align: center; font-size: 0.75rem; }
     .empty-state strong { color: #475569; font-size: 0.85rem; }
     .safety-note { flex: 0 0 auto; border-top: 1px solid #e2e8f0; background: #fffbeb; color: #92400e; padding: 0.55rem 0.75rem; font-size: 0.66rem; line-height: 1.45; }

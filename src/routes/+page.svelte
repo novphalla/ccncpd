@@ -23,7 +23,7 @@
     export let params = undefined; // SvelteKit router passes this during hydration
     $: void params;              // mark as used to silence unused-export warning
     // @ts-ignore
-    const version = '1.0.1';
+    const version = '1.1.0';
 
     // --- CONFIG ---
     

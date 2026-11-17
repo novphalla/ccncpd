@@ -149,6 +149,60 @@ async function writeModerationLog(supabase, actor, action, commentId) {
     if (error) console.warn('Unable to write lesson comment moderation log:', error.message);
 }
 
+async function createCommentNotifications(supabase, actor, comment, parentAuthorId = null) {
+    const [participantsResult, adminsResult] = await Promise.all([
+        supabase
+            .from('lesson_comments')
+            .select('author_id')
+            .eq('lesson_id', comment.lesson_id)
+            .eq('status', 'visible')
+            .neq('author_id', actor.id)
+            .limit(500),
+        supabase
+            .from('users')
+            .select('id')
+            .in('role', ['admin', 'owner'])
+            .neq('id', actor.id)
+            .limit(100)
+    ]);
+
+    if (participantsResult.error || adminsResult.error) {
+        console.warn(
+            'Unable to resolve lesson comment notification recipients:',
+            participantsResult.error?.message || adminsResult.error?.message
+        );
+        return;
+    }
+
+    const recipientTypes = new Map();
+    for (const participant of participantsResult.data || []) {
+        recipientTypes.set(participant.author_id, 'lesson_comment');
+    }
+    for (const admin of adminsResult.data || []) {
+        if (!recipientTypes.has(admin.id)) recipientTypes.set(admin.id, 'lesson_comment');
+    }
+    if (parentAuthorId && parentAuthorId !== actor.id) {
+        recipientTypes.set(parentAuthorId, 'reply');
+    }
+
+    const notifications = [...recipientTypes.entries()].map(([userId, notificationType]) => ({
+        user_id: userId,
+        actor_id: actor.id,
+        comment_id: comment.id,
+        lesson_id: comment.lesson_id,
+        course_id: comment.course_id,
+        notification_type: notificationType
+    }));
+
+    if (notifications.length === 0) return;
+
+    const { error } = await supabase
+        .from('lesson_comment_notifications')
+        .upsert(notifications, { onConflict: 'user_id,comment_id', ignoreDuplicates: true });
+
+    if (error) console.warn('Unable to create lesson comment notifications:', error.message);
+}
+
 export async function GET(event) {
     try {
         const supabase = serviceClient(event.platform);
@@ -338,10 +392,11 @@ export async function POST(event) {
         const denied = accessError(access);
         if (denied) return denied;
 
+        let parentAuthorId = null;
         if (parentId) {
             const { data: parent, error: parentError } = await supabase
                 .from('lesson_comments')
-                .select('id, lesson_id, course_id, parent_id, status')
+                .select('id, lesson_id, course_id, author_id, parent_id, status')
                 .eq('id', parentId)
                 .maybeSingle();
 
@@ -350,6 +405,7 @@ export async function POST(event) {
                 || parent.lesson_id !== access.lesson.id || parent.course_id !== access.course.id) {
                 return json({ error: 'Reply target is unavailable' }, { status: 400 });
             }
+            parentAuthorId = parent.author_id;
         }
 
         const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
@@ -377,6 +433,7 @@ export async function POST(event) {
             .single();
 
         if (error) return dbError(error);
+        await createCommentNotifications(supabase, actor, comment, parentAuthorId);
         return json({ comment: presentComment(comment, actor) }, { status: 201 });
     } catch (error) {
         return serverError(error);

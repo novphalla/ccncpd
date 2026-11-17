@@ -6,6 +6,7 @@
     import FloatingAssistant from './FloatingAssistant.svelte';
     import MarqueeFooter from './MarqueeFooter.svelte';
     import TutorialModal from './TutorialModal.svelte';
+    import LessonNotifications from './LessonNotifications.svelte';
 
     export let currentUser;
     export let supabase; // ទទួលយក supabase client
@@ -48,6 +49,9 @@
     let showStandaloneDiscussion = false;
     let discussionUnreadByCourse = {};
     let discussionUnreadByLesson = {};
+    let lessonNotificationCount = 0;
+    let showLessonNotifications = false;
+    let discussionFocusCommentId = null;
     let loadedUnreadSignature = '';
     let showTutorialModal = false;
     let courseEnrollments = {};
@@ -101,9 +105,12 @@
             now = Date.now();
         }, 1000);
         const discussionInterval = setInterval(() => loadDiscussionUnread(), 30_000);
+        const notificationInterval = setInterval(() => loadLessonNotificationCount(), 30_000);
+        loadLessonNotificationCount();
         return () => {
             clearInterval(interval);
             clearInterval(discussionInterval);
+            clearInterval(notificationInterval);
         };
     });
 
@@ -858,12 +865,65 @@
         discussionCourse = null;
         discussionLesson = null;
         discussionLessons = [];
+        discussionFocusCommentId = null;
     }
 
     function selectDiscussionLesson(lesson) {
         discussionLesson = lesson;
+        discussionFocusCommentId = null;
         showDiscussionPicker = false;
         showStandaloneDiscussion = true;
+    }
+
+    async function loadLessonNotificationCount() {
+        if (!currentUser?.id) {
+            lessonNotificationCount = 0;
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/lesson-notifications?count_only=1', {
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            if (!response.ok) return;
+            const payload = await response.json();
+            lessonNotificationCount = Number(payload.unread_count) || 0;
+        } catch (error) {
+            console.warn('Unable to load lesson notification count:', error);
+        }
+    }
+
+    async function openNotificationDiscussion(event) {
+        const { course_id: courseId, lesson_id: lessonId, comment_id: commentId } = event.detail || {};
+        showLessonNotifications = false;
+        if (!courseId || !lessonId) return;
+
+        discussionLoading = true;
+        try {
+            const [discussionModule, lessonResult] = await Promise.all([
+                LessonDiscussionComponent
+                    ? Promise.resolve({ default: LessonDiscussionComponent })
+                    : import('./LessonDiscussion.svelte'),
+                supabase.from('lessons').select('id, course_id, title').eq('id', lessonId).maybeSingle()
+            ]);
+
+            if (lessonResult.error || !lessonResult.data) throw lessonResult.error || new Error('Lesson not found');
+            const course = courses.find(item => item.id === courseId);
+            if (!course) throw new Error('Course not found');
+
+            LessonDiscussionComponent = discussionModule.default;
+            discussionCourse = course;
+            discussionLesson = lessonResult.data;
+            discussionFocusCommentId = commentId || null;
+            showStandaloneDiscussion = true;
+        } catch (error) {
+            console.error('Unable to open notification discussion:', error);
+            alert('មិនអាចបើកការពិភាក្សានេះបានទេ។');
+        } finally {
+            discussionLoading = false;
+            loadLessonNotificationCount();
+        }
     }
 
     async function loadDiscussionUnread() {
@@ -1031,6 +1091,22 @@
                 </div>
             </button>
             <div class="flex gap-1">
+                <button
+                    class="relative rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none text-teal-700"
+                    on:click={() => showLessonNotifications = true}
+                    aria-label="ការជូនដំណឹង"
+                    title="ការជូនដំណឹង"
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    {#if lessonNotificationCount + unreadCount > 0}
+                        <span class="absolute -right-2 -top-2 grid h-5 min-w-5 place-items-center rounded-full border-2 border-blue-50 bg-red-600 px-1 text-[10px] font-black text-white">
+                            {lessonNotificationCount + unreadCount > 99 ? '99+' : lessonNotificationCount + unreadCount}
+                        </span>
+                    {/if}
+                </button>
                 <button
                     class="rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none text-blue-700"
                     on:click={() => { inviteCodeMessage = ''; showPrivateAccessModal = true; }}
@@ -1555,9 +1631,17 @@
             currentUser={currentUser}
             on:close={closeStandaloneDiscussion}
             on:read={handleDiscussionRead}
+            focusCommentId={discussionFocusCommentId}
         />
     </div>
 {/if}
+
+<LessonNotifications
+    open={showLessonNotifications}
+    on:close={() => showLessonNotifications = false}
+    on:count={(event) => lessonNotificationCount = event.detail}
+    on:openDiscussion={openNotificationDiscussion}
+/>
 
 {#if showPaymentModal && selectedPaymentCourse}
     {@const paymentProgram = programConfigFor(selectedPaymentCourse)}
