@@ -5,6 +5,7 @@
         EyeOffIcon,
         FlagIcon,
         PencilIcon,
+        PinIcon,
         ReplyIcon,
         ShieldCheckIcon,
         Trash2Icon,
@@ -65,7 +66,10 @@
         <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
             <strong class="author-name">{displayName}</strong>
             {#if ['admin', 'owner'].includes(comment?.author?.role)}
-                <span class="admin-badge"><ShieldCheckIcon size={12} /> Admin</span>
+                <span class="admin-badge"><ShieldCheckIcon size={12} /> Instructor</span>
+            {/if}
+            {#if comment.is_pinned}
+                <span class="pinned-badge"><PinIcon size={11} /> Pinned Answer</span>
             {/if}
             <time datetime={comment.created_at}>{formatDate(comment.created_at)}</time>
             {#if comment.edited_at && visible}<span class="edited-label">បានកែ</span>{/if}
@@ -93,6 +97,19 @@
         {/if}
 
         {#if !editing}
+            {#if visible}
+                <div class="reaction-row" aria-label="Reaction">
+                    <button class:active={comment.my_reaction === 'like'} on:click={() => dispatch('reaction', { comment, reaction_type: 'like' })} title="Like">
+                        👍 <span>{comment.reactions?.like || 0}</span>
+                    </button>
+                    <button class:active={comment.my_reaction === 'love'} on:click={() => dispatch('reaction', { comment, reaction_type: 'love' })} title="Love">
+                        ❤️ <span>{comment.reactions?.love || 0}</span>
+                    </button>
+                    <button class:active={comment.my_reaction === 'helpful'} on:click={() => dispatch('reaction', { comment, reaction_type: 'helpful' })} title="Helpful">
+                        💡 <span>{comment.reactions?.helpful || 0}</span>
+                    </button>
+                </div>
+            {/if}
             <div class="comment-actions">
                 {#if visible && depth === 0}
                     <button on:click={() => dispatch('reply', comment)}>
@@ -119,6 +136,11 @@
                 {#if comment.can_moderate && comment.status !== 'deleted'}
                     <button on:click={() => dispatch('moderate', { comment, status: visible ? 'hidden' : 'visible' })}>
                         {#if visible}<EyeOffIcon size={14} /> លាក់{:else}<EyeIcon size={14} /> បង្ហាញ{/if}
+                    </button>
+                {/if}
+                {#if comment.can_pin}
+                    <button class:pinned-action={comment.is_pinned} on:click={() => dispatch('pin', { comment, pinned: !comment.is_pinned })}>
+                        <PinIcon size={14} /> {comment.is_pinned ? 'ដក Pin' : 'Pin Answer'}
                     </button>
                 {/if}
             </div>
@@ -183,6 +205,18 @@
         font-weight: 800;
     }
 
+    .pinned-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.18rem;
+        border-radius: 999px;
+        background: #fef3c7;
+        color: #b45309;
+        padding: 0.1rem 0.4rem;
+        font-size: 0.62rem;
+        font-weight: 800;
+    }
+
     .comment-body {
         margin-top: 0.35rem;
         white-space: pre-wrap;
@@ -206,6 +240,23 @@
         gap: 0.15rem 0.55rem;
     }
 
+    .reaction-row { margin-top: 0.45rem; display: flex; flex-wrap: wrap; gap: 0.3rem; }
+    .reaction-row button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.22rem;
+        min-width: 2.7rem;
+        justify-content: center;
+        border: 1px solid #e2e8f0;
+        border-radius: 999px;
+        background: #f8fafc;
+        color: #64748b;
+        padding: 0.2rem 0.45rem;
+        font-size: 0.68rem;
+        font-weight: 800;
+    }
+    .reaction-row button:hover, .reaction-row button.active { border-color: #5eead4; background: #ccfbf1; color: #0f766e; }
+
     .comment-actions button {
         display: inline-flex;
         align-items: center;
@@ -222,6 +273,7 @@
     .comment-actions button:hover:not(:disabled) { color: #0f766e; }
     .comment-actions button.danger:hover { color: #dc2626; }
     .comment-actions button.reported { color: #b45309; }
+    .comment-actions button.pinned-action { color: #b45309; }
     .comment-actions button:disabled { cursor: default; opacity: 0.72; }
 
     .edit-box { margin-top: 0.45rem; }

@@ -6,6 +6,7 @@
         LoaderCircleIcon,
         MessageCircleIcon,
         RefreshCwIcon,
+        SearchIcon,
         SendIcon,
         XIcon
     } from 'lucide-svelte';
@@ -31,8 +32,14 @@
     let reportDetails = '';
     let activeLessonId = null;
     let refreshTimer;
+    let searchTerm = '';
+    let commentFilter = 'all';
+    let sortMode = 'oldest';
 
     $: topLevelComments = comments.filter(comment => !comment.parent_id);
+    $: filteredComments = topLevelComments
+        .filter(comment => threadMatches(comment))
+        .sort(compareComments);
     $: if (typeof window !== 'undefined' && lesson?.id && lesson.id !== activeLessonId) {
         activeLessonId = lesson.id;
         composer = '';
@@ -42,6 +49,42 @@
 
     function repliesFor(commentId) {
         return comments.filter(comment => comment.parent_id === commentId);
+    }
+
+    function commentMatchesSearch(comment) {
+        const query = searchTerm.trim().toLocaleLowerCase();
+        if (!query) return true;
+        return [comment.body, comment.author?.full_name, comment.author?.name_latin]
+            .filter(Boolean)
+            .some(value => String(value).toLocaleLowerCase().includes(query));
+    }
+
+    function isInstructor(comment) {
+        return ['admin', 'owner'].includes(comment.author?.role);
+    }
+
+    function threadMatches(comment) {
+        const thread = [comment, ...repliesFor(comment.id)];
+        if (!thread.some(commentMatchesSearch)) return false;
+        if (commentFilter === 'pinned') return comment.is_pinned;
+        if (commentFilter === 'instructor') return thread.some(isInstructor);
+        if (commentFilter === 'mine') return thread.some(item => item.author_id === currentUser?.id);
+        return true;
+    }
+
+    function reactionTotal(comment) {
+        return Object.values(comment.reactions || {}).reduce((total, value) => total + Number(value || 0), 0);
+    }
+
+    function threadReactionTotal(comment) {
+        return [comment, ...repliesFor(comment.id)].reduce((total, item) => total + reactionTotal(item), 0);
+    }
+
+    function compareComments(left, right) {
+        if (left.is_pinned !== right.is_pinned) return left.is_pinned ? -1 : 1;
+        if (sortMode === 'popular') return threadReactionTotal(right) - threadReactionTotal(left);
+        const difference = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+        return sortMode === 'newest' ? -difference : difference;
     }
 
     function apiError(payload, fallback) {
@@ -216,6 +259,52 @@
         }
     }
 
+    async function reactToComment(event) {
+        if (actionBusy) return;
+        actionBusy = true;
+        const { comment, reaction_type } = event.detail;
+        try {
+            const response = await fetch('/api/lesson-comments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ action: 'reaction', comment_id: comment.id, reaction_type })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(apiError(payload, 'មិនអាចដាក់ reaction បានទេ។'));
+            comments = comments.map(item => item.id === payload.comment_id
+                ? { ...item, reactions: payload.reactions, my_reaction: payload.my_reaction }
+                : item);
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចដាក់ reaction បានទេ។';
+        } finally {
+            actionBusy = false;
+        }
+    }
+
+    async function pinComment(event) {
+        if (actionBusy) return;
+        actionBusy = true;
+        const { comment, pinned } = event.detail;
+        try {
+            const response = await fetch('/api/lesson-comments', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ action: 'pin', comment_id: comment.id, pinned })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(apiError(payload, 'មិនអាច Pin comment បានទេ។'));
+            comments = comments.map(item => item.id === payload.comment.id
+                ? { ...item, ...payload.comment, reactions: item.reactions, my_reaction: item.my_reaction }
+                : item);
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាច Pin comment បានទេ។';
+        } finally {
+            actionBusy = false;
+        }
+    }
+
     function beginReply(event) {
         replyTo = event.detail;
         tick().then(() => composerElement?.focus());
@@ -334,17 +423,38 @@
         </div>
     {/if}
 
+    <div class="comment-tools">
+        <label class="search-box">
+            <SearchIcon size={15} />
+            <input bind:value={searchTerm} placeholder="ស្វែងរក comment ឬឈ្មោះ..." aria-label="ស្វែងរក comment" />
+            {#if searchTerm}<button on:click={() => searchTerm = ''} aria-label="សម្អាតការស្វែងរក">×</button>{/if}
+        </label>
+        <div class="filter-row">
+            <select bind:value={commentFilter} aria-label="តម្រង comment">
+                <option value="all">Comment ទាំងអស់</option>
+                <option value="pinned">Pinned Answer</option>
+                <option value="instructor">Instructor</option>
+                <option value="mine">Comment របស់ខ្ញុំ</option>
+            </select>
+            <select bind:value={sortMode} aria-label="តម្រៀប comment">
+                <option value="oldest">ចាស់មុន</option>
+                <option value="newest">ថ្មីមុន</option>
+                <option value="popular">Reaction ច្រើន</option>
+            </select>
+        </div>
+    </div>
+
     <div class="discussion-list">
         {#if loading}
             <div class="empty-state"><LoaderCircleIcon class="animate-spin" size={24} /><span>កំពុងផ្ទុកមតិ...</span></div>
-        {:else if topLevelComments.length === 0}
+        {:else if filteredComments.length === 0}
             <div class="empty-state">
                 <MessageCircleIcon size={32} />
-                <strong>មិនទាន់មានមតិ</strong>
-                <span>ចាប់ផ្ដើមការពិភាក្សាអំពីមេរៀននេះ។</span>
+                <strong>{topLevelComments.length === 0 ? 'មិនទាន់មានមតិ' : 'រកមិនឃើញ comment'}</strong>
+                <span>{topLevelComments.length === 0 ? 'ចាប់ផ្ដើមការពិភាក្សាអំពីមេរៀននេះ។' : 'សូមប្ដូរពាក្យស្វែងរក ឬតម្រង។'}</span>
             </div>
         {:else}
-            {#each topLevelComments as comment (comment.id)}
+            {#each filteredComments as comment (comment.id)}
                 <div data-comment-id={comment.id} class:focused-comment={focusCommentId === comment.id}>
                     <LessonCommentItem
                         {comment}
@@ -353,6 +463,8 @@
                         on:delete={deleteComment}
                         on:report={beginReport}
                         on:moderate={moderateComment}
+                        on:reaction={reactToComment}
+                        on:pin={pinComment}
                     />
                 </div>
                 {#each repliesFor(comment.id) as reply (reply.id)}
@@ -364,6 +476,7 @@
                             on:delete={deleteComment}
                             on:report={beginReport}
                             on:moderate={moderateComment}
+                            on:reaction={reactToComment}
                         />
                     </div>
                 {/each}
@@ -478,6 +591,14 @@
     .error-banner { margin: 0.6rem 0.75rem 0; display: flex; align-items: center; gap: 0.45rem; border: 1px solid #fecaca; border-radius: 0.55rem; background: #fef2f2; color: #b91c1c; padding: 0.5rem 0.6rem; font-size: 0.72rem; }
     .error-banner span { min-width: 0; flex: 1; }
     .error-banner button { border: 0; background: transparent; color: inherit; }
+
+    .comment-tools { flex: 0 0 auto; display: grid; gap: 0.45rem; border-bottom: 1px solid #e2e8f0; background: #fff; padding: 0.6rem 0.75rem; }
+    .search-box { display: flex; align-items: center; gap: 0.4rem; border: 1px solid #cbd5e1; border-radius: 0.6rem; padding: 0.42rem 0.55rem; color: #64748b; }
+    .search-box:focus-within { border-color: #0d9488; box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.1); }
+    .search-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: #17212b; font-size: 0.72rem; }
+    .search-box button { border: 0; background: transparent; color: #94a3b8; font-size: 1rem; }
+    .filter-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+    .filter-row select { min-width: 0; border: 1px solid #e2e8f0; border-radius: 0.5rem; background: #f8fafc; color: #475569; padding: 0.38rem 0.45rem; font-size: 0.68rem; font-weight: 700; }
 
     .discussion-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 0.8rem; }
     .focused-comment { border-radius: 0.75rem; animation: comment-focus 2.5s ease-out; }

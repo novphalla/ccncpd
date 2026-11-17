@@ -3,6 +3,7 @@ import { getRequestUserId, serviceClient } from '$lib/server/requestAuth';
 
 const ADMIN_ROLES = new Set(['admin', 'owner']);
 const REPORT_REASONS = new Set(['spam', 'harassment', 'privacy', 'misinformation', 'other']);
+const REACTION_TYPES = new Set(['like', 'love', 'helpful']);
 const COMMENT_SELECT = `
     id,
     lesson_id,
@@ -11,6 +12,9 @@ const COMMENT_SELECT = `
     parent_id,
     body,
     status,
+    is_pinned,
+    pinned_at,
+    pinned_by,
     edited_at,
     created_at,
     updated_at,
@@ -115,7 +119,7 @@ function accessError(access) {
     return null;
 }
 
-function presentComment(comment, actor, reportedIds = new Set(), reportCounts = new Map()) {
+function presentComment(comment, actor, reportedIds = new Set(), reportCounts = new Map(), reactionCounts = new Map(), myReactions = new Map()) {
     const isAdmin = ADMIN_ROLES.has(actor.role);
     const isAuthor = comment.author_id === actor.id;
     const isVisible = comment.status === 'visible';
@@ -126,9 +130,32 @@ function presentComment(comment, actor, reportedIds = new Set(), reportCounts = 
         can_edit: isAuthor && isVisible,
         can_delete: isAuthor || isAdmin,
         can_moderate: isAdmin,
+        can_pin: isAdmin && isVisible && !comment.parent_id,
         reported_by_me: reportedIds.has(comment.id),
-        report_count: isAdmin ? (reportCounts.get(comment.id) || 0) : 0
+        report_count: isAdmin ? (reportCounts.get(comment.id) || 0) : 0,
+        reactions: reactionCounts.get(comment.id) || { like: 0, love: 0, helpful: 0 },
+        my_reaction: myReactions.get(comment.id) || null
     };
+}
+
+async function loadReactionSummary(supabase, commentIds, actorId) {
+    const counts = new Map();
+    const mine = new Map();
+    if (!commentIds.length) return { counts, mine, error: null };
+
+    const { data, error } = await supabase
+        .from('lesson_comment_reactions')
+        .select('comment_id, user_id, reaction_type')
+        .in('comment_id', commentIds);
+    if (error) return { counts, mine, error };
+
+    for (const reaction of data || []) {
+        const current = counts.get(reaction.comment_id) || { like: 0, love: 0, helpful: 0 };
+        current[reaction.reaction_type] = (current[reaction.reaction_type] || 0) + 1;
+        counts.set(reaction.comment_id, current);
+        if (reaction.user_id === actorId) mine.set(reaction.comment_id, reaction.reaction_type);
+    }
+    return { counts, mine, error: null };
 }
 
 async function loadComment(supabase, commentId) {
@@ -264,6 +291,7 @@ export async function GET(event) {
             .from('lesson_comments')
             .select(COMMENT_SELECT)
             .eq('lesson_id', access.lesson.id)
+            .order('is_pinned', { ascending: false })
             .order('created_at', { ascending: true })
             .limit(200);
 
@@ -272,6 +300,8 @@ export async function GET(event) {
         const commentIds = (comments || []).map(comment => comment.id);
         let reportedIds = new Set();
         let reportCounts = new Map();
+        const reactionSummary = await loadReactionSummary(supabase, commentIds, actor.id);
+        if (reactionSummary.error) return dbError(reactionSummary.error);
         if (commentIds.length > 0) {
             let reportsQuery = supabase
                 .from('lesson_comment_reports')
@@ -294,7 +324,14 @@ export async function GET(event) {
         }
 
         return json({
-            comments: (comments || []).map(comment => presentComment(comment, actor, reportedIds, reportCounts)),
+            comments: (comments || []).map(comment => presentComment(
+                comment,
+                actor,
+                reportedIds,
+                reportCounts,
+                reactionSummary.counts,
+                reactionSummary.mine
+            )),
             can_moderate: ADMIN_ROLES.has(actor.role)
         });
     } catch (error) {
@@ -376,6 +413,52 @@ export async function POST(event) {
             return json({ success: true });
         }
 
+        if (body.action === 'reaction') {
+            if (!validUuid(body.comment_id) || !REACTION_TYPES.has(body.reaction_type)) {
+                return json({ error: 'Invalid reaction' }, { status: 400 });
+            }
+
+            const { data: comment, error: commentError } = await loadComment(supabase, body.comment_id);
+            if (commentError) return dbError(commentError);
+            if (!comment || comment.status !== 'visible') return json({ error: 'Comment not found' }, { status: 404 });
+
+            const access = await requireLessonAccess(supabase, actor, comment.lesson_id, comment.course_id);
+            const denied = accessError(access);
+            if (denied) return denied;
+
+            const { data: existing, error: existingError } = await supabase
+                .from('lesson_comment_reactions')
+                .select('reaction_type')
+                .eq('comment_id', comment.id)
+                .eq('user_id', actor.id)
+                .maybeSingle();
+            if (existingError) return dbError(existingError);
+
+            if (existing?.reaction_type === body.reaction_type) {
+                const { error } = await supabase
+                    .from('lesson_comment_reactions')
+                    .delete()
+                    .eq('comment_id', comment.id)
+                    .eq('user_id', actor.id);
+                if (error) return dbError(error);
+            } else {
+                const { error } = await supabase.from('lesson_comment_reactions').upsert({
+                    comment_id: comment.id,
+                    user_id: actor.id,
+                    reaction_type: body.reaction_type
+                }, { onConflict: 'comment_id,user_id' });
+                if (error) return dbError(error);
+            }
+
+            const summary = await loadReactionSummary(supabase, [comment.id], actor.id);
+            if (summary.error) return dbError(summary.error);
+            return json({
+                comment_id: comment.id,
+                reactions: summary.counts.get(comment.id) || { like: 0, love: 0, helpful: 0 },
+                my_reaction: summary.mine.get(comment.id) || null
+            });
+        }
+
         const lessonId = body.lesson_id;
         const courseId = body.course_id;
         const commentBody = cleanBody(body.body);
@@ -391,6 +474,28 @@ export async function POST(event) {
         const access = await requireLessonAccess(supabase, actor, lessonId, courseId);
         const denied = accessError(access);
         if (denied) return denied;
+
+        if (body.action === 'pin') {
+            if (!ADMIN_ROLES.has(actor.role)) return json({ error: 'Forbidden' }, { status: 403 });
+            if (existing.parent_id || existing.status !== 'visible') {
+                return json({ error: 'Only visible top-level comments can be pinned' }, { status: 400 });
+            }
+
+            const pinned = body.pinned === true;
+            const { data: comment, error } = await supabase
+                .from('lesson_comments')
+                .update({
+                    is_pinned: pinned,
+                    pinned_at: pinned ? new Date().toISOString() : null,
+                    pinned_by: pinned ? actor.id : null
+                })
+                .eq('id', existing.id)
+                .select(COMMENT_SELECT)
+                .single();
+            if (error) return dbError(error);
+            await writeModerationLog(supabase, actor, pinned ? 'lesson_comment_pinned' : 'lesson_comment_unpinned', existing.id);
+            return json({ comment: presentComment(comment, actor) });
+        }
 
         let parentAuthorId = null;
         if (parentId) {
@@ -472,6 +577,9 @@ export async function PATCH(event) {
                 .from('lesson_comments')
                 .update({
                     status,
+                    is_pinned: status === 'visible' ? existing.is_pinned : false,
+                    pinned_at: status === 'visible' ? existing.pinned_at : null,
+                    pinned_by: status === 'visible' ? existing.pinned_by : null,
                     moderated_at: new Date().toISOString(),
                     moderated_by: actor.id
                 })
@@ -541,6 +649,9 @@ export async function DELETE(event) {
             .update({
                 body: '',
                 status: 'deleted',
+                is_pinned: false,
+                pinned_at: null,
+                pinned_by: null,
                 moderated_at: isAdmin ? new Date().toISOString() : null,
                 moderated_by: isAdmin ? actor.id : null
             })
