@@ -34,7 +34,7 @@
     let refreshTimer;
     let searchTerm = '';
     let commentFilter = 'all';
-    let sortMode = 'oldest';
+    let sortMode = 'newest';
 
     $: topLevelComments = comments.filter(comment => !comment.parent_id);
     $: filteredComments = topLevelComments
@@ -437,8 +437,8 @@
                 <option value="mine">Comment របស់ខ្ញុំ</option>
             </select>
             <select bind:value={sortMode} aria-label="តម្រៀប comment">
-                <option value="oldest">ចាស់មុន</option>
                 <option value="newest">ថ្មីមុន</option>
+                <option value="oldest">ចាស់មុន</option>
                 <option value="popular">Reaction ច្រើន</option>
             </select>
         </div>
