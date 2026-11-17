@@ -187,7 +187,7 @@
             items: [
                 { tab: 'courses', label: 'Course Library', note: 'មាតិកា PDF/Video និង Quiz', tone: 'amber', icon: 'book' },
                 { tab: 'forms', label: 'Forms Library', note: 'បែបបទចុះឈ្មោះ និងវាយតម្លៃ', tone: 'blue', icon: 'form' },
-                { tab: 'discussion_moderation', label: 'Comment Reports', note: 'ពិនិត្យ លាក់ ឬលុប comment ដែលបាន report', tone: 'red', icon: 'flag', adminOnly: true },
+                { tab: 'discussion_moderation', label: 'Comment & Chat Reports', note: 'ពិនិត្យ Comment និង Private Chat ដែលបាន report', tone: 'red', icon: 'flag', adminOnly: true },
                 { tab: 'storage', label: 'Storage', note: 'រូបភាព PDF Video និង assets', tone: 'pink', icon: 'storage' }
             ]
         },

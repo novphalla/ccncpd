@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
 
     let reports = [];
+    let reportKind = 'comment';
     let status = 'pending';
     let loading = true;
     let busyId = null;
@@ -18,6 +19,7 @@
         spam: 'Spam',
         harassment: 'ការរំខាន/ប្រមាថ',
         privacy: 'បញ្ហាឯកជនភាព',
+        inappropriate: 'ខ្លឹមសារមិនសមរម្យ',
         misinformation: 'ព័ត៌មានមិនត្រឹមត្រូវ',
         other: 'ផ្សេងៗ'
     };
@@ -37,7 +39,8 @@
         loading = true;
         errorMessage = '';
         try {
-            const response = await fetch(`/api/admin/lesson-comment-reports?status=${encodeURIComponent(status)}`, {
+            const endpoint = reportKind === 'chat' ? '/api/admin/private-chat-reports' : '/api/admin/lesson-comment-reports';
+            const response = await fetch(`${endpoint}?status=${encodeURIComponent(status)}`, {
                 credentials: 'same-origin',
                 cache: 'no-store'
             });
@@ -57,15 +60,23 @@
         await loadReports();
     }
 
+    async function changeKind(nextKind) {
+        if (reportKind === nextKind) return;
+        reportKind = nextKind;
+        status = 'pending';
+        await loadReports();
+    }
+
     async function moderate(report, action) {
         if (busyId) return;
-        const labels = { dismiss: 'បដិសេធ report នេះ', hide: 'លាក់ comment នេះ', delete: 'លុប comment នេះ' };
+        const labels = { dismiss: 'បដិសេធ report នេះ', hide: 'លាក់ comment នេះ', delete: 'លុប comment នេះ', resolve: 'កំណត់ថាបានដោះស្រាយ', block: 'Block អ្នកដែលត្រូវបាន report' };
         if (!confirm(`តើអ្នកពិតជាចង់${labels[action]}មែនទេ?`)) return;
 
         busyId = report.id;
         errorMessage = '';
         try {
-            const response = await fetch('/api/admin/lesson-comment-reports', {
+            const endpoint = reportKind === 'chat' ? '/api/admin/private-chat-reports' : '/api/admin/lesson-comment-reports';
+            const response = await fetch(endpoint, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
@@ -73,9 +84,11 @@
             });
             const payload = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(payload.error || 'មិនអាចដោះស្រាយ report បានទេ។');
-            reports = action === 'dismiss'
+            reports = reportKind === 'chat'
                 ? reports.filter(item => item.id !== report.id)
-                : reports.filter(item => item.comment_id !== report.comment_id);
+                : action === 'dismiss'
+                    ? reports.filter(item => item.id !== report.id)
+                    : reports.filter(item => item.comment_id !== report.comment_id);
         } catch (error) {
             errorMessage = error.message || 'មិនអាចដោះស្រាយ report បានទេ។';
         } finally {
@@ -88,10 +101,15 @@
     <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-                <h2 class="text-xl font-black text-slate-900">ការគ្រប់គ្រង Comment</h2>
-                <p class="mt-1 text-sm text-slate-500">ពិនិត្យ report របស់សមាជិក ហើយជ្រើសរើសលាក់ លុប ឬបដិសេធ។</p>
+                <h2 class="text-xl font-black text-slate-900">ការគ្រប់គ្រង Comment និង Private Chat</h2>
+                <p class="mt-1 text-sm text-slate-500">ពិនិត្យ report របស់សមាជិក និងដោះស្រាយបញ្ហាសុវត្ថិភាព។</p>
             </div>
             <button class="btn btn-sm border-slate-200 bg-white text-slate-700 hover:bg-slate-50" on:click={loadReports}>↻ ផ្ទុកឡើងវិញ</button>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-2 border-b border-slate-200 pb-4">
+            <button class="rounded-xl px-4 py-2 text-sm font-black {reportKind === 'comment' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}" on:click={() => changeKind('comment')}>💬 Comment Reports</button>
+            <button class="rounded-xl px-4 py-2 text-sm font-black {reportKind === 'chat' ? 'bg-blue-700 text-white' : 'bg-slate-100 text-slate-600'}" on:click={() => changeKind('chat')}>🔒 Private Chat Reports</button>
         </div>
 
         <div class="mt-4 flex flex-wrap gap-2">
@@ -133,24 +151,44 @@
                         <div class="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{report.details}</div>
                     {/if}
 
-                    <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                        <div class="flex items-center justify-between gap-3 text-xs">
-                            <strong class="text-slate-800">{displayName(report.comment?.author)}</strong>
-                            <span class="text-slate-400">{formatDate(report.comment?.created_at)}</span>
+                    {#if reportKind === 'chat'}
+                        <div class="mt-4 rounded-xl border border-red-100 bg-red-50/60 p-4">
+                            <div class="text-xs text-slate-500">សមាជិកដែលត្រូវបាន Report</div>
+                            <strong class="mt-1 block text-slate-900">{displayName(report.reported_user)}</strong>
+                            {#if report.message}
+                                <div class="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+                                    <div class="text-[10px] font-bold text-slate-400">សារដែលបាន Report · {formatDate(report.message.created_at)}</div>
+                                    <p class="mt-1 whitespace-pre-wrap text-sm text-slate-700">{report.message.body}</p>
+                                </div>
+                            {:else}
+                                <p class="mt-3 text-xs text-slate-500">Report លើការសន្ទនាទាំងមូល (មិនបានជ្រើសសារជាក់លាក់)។</p>
+                            {/if}
                         </div>
-                        <p class="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-                            {report.comment?.body || (report.comment?.status === 'deleted' ? '[Comment ត្រូវបានលុប]' : '[មិនមានខ្លឹមសារ]')}
-                        </p>
-                        <div class="mt-3 border-t border-slate-200 pt-3 text-xs font-semibold text-teal-700">
-                            {report.comment?.course?.title || 'វគ្គសិក្សា'} · {report.comment?.lesson?.title || 'មេរៀន'}
+                    {:else}
+                        <div class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                            <div class="flex items-center justify-between gap-3 text-xs">
+                                <strong class="text-slate-800">{displayName(report.comment?.author)}</strong>
+                                <span class="text-slate-400">{formatDate(report.comment?.created_at)}</span>
+                            </div>
+                            <p class="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+                                {report.comment?.body || (report.comment?.status === 'deleted' ? '[Comment ត្រូវបានលុប]' : '[មិនមានខ្លឹមសារ]')}
+                            </p>
+                            <div class="mt-3 border-t border-slate-200 pt-3 text-xs font-semibold text-teal-700">
+                                {report.comment?.course?.title || 'វគ្គសិក្សា'} · {report.comment?.lesson?.title || 'មេរៀន'}
+                            </div>
                         </div>
-                    </div>
+                    {/if}
 
                     {#if report.status === 'pending'}
                         <div class="mt-4 grid grid-cols-3 gap-2">
                             <button class="btn btn-sm border-slate-300 bg-white text-slate-700 hover:bg-slate-100" on:click={() => moderate(report, 'dismiss')} disabled={busyId === report.id}>បដិសេធ</button>
-                            <button class="btn btn-sm border-amber-500 bg-amber-50 text-amber-800 hover:bg-amber-100" on:click={() => moderate(report, 'hide')} disabled={busyId === report.id}>លាក់</button>
-                            <button class="btn btn-sm border-red-600 bg-red-600 text-white hover:bg-red-700" on:click={() => moderate(report, 'delete')} disabled={busyId === report.id}>លុប</button>
+                            {#if reportKind === 'chat'}
+                                <button class="btn btn-sm border-emerald-600 bg-emerald-50 text-emerald-800 hover:bg-emerald-100" on:click={() => moderate(report, 'resolve')} disabled={busyId === report.id}>ដោះស្រាយ</button>
+                                <button class="btn btn-sm border-red-600 bg-red-600 text-white hover:bg-red-700" on:click={() => moderate(report, 'block')} disabled={busyId === report.id}>Block</button>
+                            {:else}
+                                <button class="btn btn-sm border-amber-500 bg-amber-50 text-amber-800 hover:bg-amber-100" on:click={() => moderate(report, 'hide')} disabled={busyId === report.id}>លាក់</button>
+                                <button class="btn btn-sm border-red-600 bg-red-600 text-white hover:bg-red-700" on:click={() => moderate(report, 'delete')} disabled={busyId === report.id}>លុប</button>
+                            {/if}
                         </div>
                     {:else if report.reviewer}
                         <p class="mt-4 text-xs text-slate-500">ពិនិត្យដោយ {displayName(report.reviewer)} · {formatDate(report.reviewed_at)}</p>

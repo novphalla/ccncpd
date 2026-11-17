@@ -112,6 +112,12 @@
         const chatInterval = setInterval(() => loadPrivateChatCount(), 15_000);
         loadLessonNotificationCount();
         loadPrivateChatCount();
+        const chatUrl = new URL(window.location.href);
+        if (chatUrl.searchParams.get('openChat') === '1') {
+            showPrivateChat = true;
+            chatUrl.searchParams.delete('openChat');
+            window.history.replaceState(window.history.state, '', `${chatUrl.pathname}${chatUrl.search}${chatUrl.hash}`);
+        }
         return () => {
             clearInterval(interval);
             clearInterval(discussionInterval);
@@ -1685,6 +1691,7 @@
 <PrivateChat
     open={showPrivateChat}
     {currentUser}
+    {supabase}
     on:close={() => showPrivateChat = false}
     on:count={(event) => privateChatUnreadCount = event.detail}
 />

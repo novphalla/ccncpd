@@ -33,6 +33,7 @@
   },
   "type": "module",
   "dependencies": {
+    "@block65/webcrypto-web-push": "^2.0.0",
     "@capacitor/android": "^8.6.2",
     "@capacitor/core": "^8.6.2",
     "@fontsource/battambang": "^5.2.8",

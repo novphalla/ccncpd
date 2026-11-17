@@ -3,6 +3,7 @@
 
     export let open = false;
     export let currentUser;
+    export let supabase;
 
     const dispatch = createEventDispatcher();
     let conversations = [];
@@ -16,10 +17,25 @@
     let memberResults = [];
     let searching = false;
     let errorMessage = '';
+    let successMessage = '';
     let listElement;
     let wasOpen = false;
     let pollTimer;
     let searchTimer;
+    let realtimeChannel;
+    let realtimeConnected = false;
+    let typing = false;
+    let typingTimer;
+    let lastTypingSent = 0;
+    let showSafetyMenu = false;
+    let showReportForm = false;
+    let reportReason = 'spam';
+    let reportDetails = '';
+    let safetyBusy = false;
+    let pushSupported = false;
+    let pushEnabled = false;
+    let pushBusy = false;
+    let pushDenied = false;
 
     $: if (open && !wasOpen) {
         wasOpen = true;
@@ -32,19 +48,25 @@
         messages = [];
         memberSearch = '';
         memberResults = [];
+        cleanupRealtime();
     }
 
     onMount(() => {
+        pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+        pushDenied = pushSupported && Notification.permission === 'denied';
+        if (pushSupported && Notification.permission === 'granted') syncPushSubscription();
         pollTimer = setInterval(() => {
             if (!open || document.visibilityState !== 'visible') return;
             if (activeConversation) loadMessages(false);
             else loadConversations(false);
-        }, 5000);
+        }, 15000);
     });
 
     onDestroy(() => {
         clearInterval(pollTimer);
         clearTimeout(searchTimer);
+        clearTimeout(typingTimer);
+        cleanupRealtime();
     });
 
     function nameOf(member) {
@@ -62,6 +84,118 @@
         return date.toDateString() === today.toDateString()
             ? date.toLocaleTimeString('km-KH', { hour: '2-digit', minute: '2-digit' })
             : date.toLocaleDateString('km-KH', { day: 'numeric', month: 'short' });
+    }
+
+    function messageStatus(message) {
+        if (message.read_at) return 'បានមើល';
+        if (message.delivered_at) return 'បានទទួល';
+        return 'បានផ្ញើ';
+    }
+
+    function cleanupRealtime() {
+        if (realtimeChannel && supabase) supabase.removeChannel(realtimeChannel).catch(() => {});
+        realtimeChannel = null;
+        realtimeConnected = false;
+        typing = false;
+        clearTimeout(typingTimer);
+    }
+
+    function connectRealtime(conversationId) {
+        cleanupRealtime();
+        if (!supabase || !conversationId) return;
+        realtimeChannel = supabase.channel(`private-chat:${conversationId}`, {
+            config: { private: false, broadcast: { self: false, ack: false } }
+        });
+        realtimeChannel
+            .on('broadcast', { event: 'message' }, ({ payload }) => {
+                if (payload?.sender_id !== currentUser?.id) loadMessages(false);
+            })
+            .on('broadcast', { event: 'receipt' }, () => loadMessages(false))
+            .on('broadcast', { event: 'block' }, () => loadMessages(false))
+            .on('broadcast', { event: 'typing' }, ({ payload }) => {
+                if (payload?.user_id === currentUser?.id) return;
+                typing = Boolean(payload?.typing);
+                clearTimeout(typingTimer);
+                if (typing) typingTimer = setTimeout(() => typing = false, 2500);
+            })
+            .subscribe(status => {
+                realtimeConnected = status === 'SUBSCRIBED';
+            });
+    }
+
+    function sendTyping(isTyping = true) {
+        if (!realtimeChannel || !realtimeConnected) return;
+        const now = Date.now();
+        if (isTyping && now - lastTypingSent < 900) return;
+        lastTypingSent = now;
+        realtimeChannel.send({
+            type: 'broadcast',
+            event: 'typing',
+            payload: { user_id: currentUser?.id, typing: isTyping }
+        }).catch(() => {});
+    }
+
+    function handleComposerInput() {
+        sendTyping(Boolean(composer.trim()));
+    }
+
+    function urlBase64ToUint8Array(value) {
+        const padding = '='.repeat((4 - value.length % 4) % 4);
+        const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const raw = atob(base64);
+        return Uint8Array.from(raw, character => character.charCodeAt(0));
+    }
+
+    async function savePushSubscription(subscription) {
+        const response = await fetch('/api/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ subscription: subscription.toJSON() })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || 'មិនអាចរក្សាទុក Push Notification បានទេ។');
+    }
+
+    async function syncPushSubscription() {
+        try {
+            const registration = await navigator.serviceWorker.ready;
+            const subscription = await registration.pushManager.getSubscription();
+            pushEnabled = Boolean(subscription);
+            if (subscription) await savePushSubscription(subscription);
+        } catch (error) {
+            console.warn('Unable to sync push subscription:', error);
+        }
+    }
+
+    async function enablePushNotifications() {
+        if (!pushSupported || pushBusy) return;
+        pushBusy = true;
+        try {
+            const configResponse = await fetch('/api/subscribe', { credentials: 'same-origin', cache: 'no-store' });
+            const config = await configResponse.json().catch(() => ({}));
+            if (!configResponse.ok || !config.available || !config.public_key) {
+                throw new Error('Push Notification មិនទាន់បានកំណត់នៅ Server ទេ។');
+            }
+            const permission = await Notification.requestPermission();
+            pushDenied = permission === 'denied';
+            if (permission !== 'granted') throw new Error('សូមអនុញ្ញាត Notification ក្នុង Browser settings។');
+            const registration = await navigator.serviceWorker.ready;
+            let subscription = await registration.pushManager.getSubscription();
+            if (!subscription) {
+                subscription = await registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(config.public_key)
+                });
+            }
+            await savePushSubscription(subscription);
+            pushEnabled = true;
+            errorMessage = '';
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចបើក Push Notification បានទេ។';
+        } finally {
+            pushBusy = false;
+        }
     }
 
     async function loadConversations(showLoader = true) {
@@ -120,8 +254,10 @@
             if (!response.ok) throw new Error(payload.error || 'មិនអាចចាប់ផ្ដើម Chat បានទេ។');
             activeConversation = payload.conversation;
             activeMember = payload.member;
+            activeConversation = { ...activeConversation, block_state: payload.block_state || {} };
             memberSearch = '';
             memberResults = [];
+            connectRealtime(activeConversation.realtime_topic);
             await loadMessages();
         } catch (error) {
             errorMessage = error.message || 'មិនអាចចាប់ផ្ដើម Chat បានទេ។';
@@ -133,6 +269,7 @@
     async function openConversation(conversation) {
         activeConversation = conversation;
         activeMember = conversation.member;
+        connectRealtime(conversation.realtime_topic);
         await loadMessages();
     }
 
@@ -147,6 +284,8 @@
             if (!response.ok) throw new Error(payload.error || 'មិនអាចទាញយកសារបានទេ។');
             const previousLast = messages.at(-1)?.id;
             messages = payload.messages || [];
+            if (payload.member) activeMember = payload.member;
+            activeConversation = { ...activeConversation, ...(payload.conversation || {}), block_state: payload.block_state || activeConversation.block_state || {} };
             await markRead();
             if (showLoader || previousLast !== messages.at(-1)?.id) {
                 await tick();
@@ -192,6 +331,7 @@
             if (!response.ok) throw new Error(payload.error || 'មិនអាចផ្ញើសារបានទេ។');
             messages = [...messages, payload.message];
             composer = '';
+            sendTyping(false);
             errorMessage = '';
             await tick();
             listElement?.scrollTo({ top: listElement.scrollHeight, behavior: 'smooth' });
@@ -202,7 +342,62 @@
         }
     }
 
+    async function updateBlock(action) {
+        if (!activeConversation?.id || safetyBusy) return;
+        const label = action === 'block' ? `បិទការទាក់ទងពី ${nameOf(activeMember)}?` : `បើកការទាក់ទងជាមួយ ${nameOf(activeMember)} វិញ?`;
+        if (!confirm(label)) return;
+        safetyBusy = true;
+        try {
+            const response = await fetch('/api/private-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ action, conversation_id: activeConversation.id })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || 'មិនអាចកែស្ថានភាព Block បានទេ។');
+            activeConversation = { ...activeConversation, block_state: payload.block_state || {} };
+            showSafetyMenu = false;
+            errorMessage = '';
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចកែស្ថានភាព Block បានទេ។';
+        } finally {
+            safetyBusy = false;
+        }
+    }
+
+    async function submitReport() {
+        if (!activeConversation?.id || safetyBusy) return;
+        safetyBusy = true;
+        try {
+            const response = await fetch('/api/private-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    action: 'report',
+                    conversation_id: activeConversation.id,
+                    reason: reportReason,
+                    details: reportDetails.trim()
+                })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || 'មិនអាចផ្ញើ Report បានទេ។');
+            showReportForm = false;
+            showSafetyMenu = false;
+            reportReason = 'spam';
+            reportDetails = '';
+            successMessage = 'បានផ្ញើ Report ទៅអ្នកគ្រប់គ្រងរួចហើយ។';
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចផ្ញើ Report បានទេ។';
+        } finally {
+            safetyBusy = false;
+        }
+    }
+
     function backToList() {
+        sendTyping(false);
+        cleanupRealtime();
         activeConversation = null;
         activeMember = null;
         messages = [];
@@ -215,7 +410,7 @@
     <div class="fixed inset-0 z-[105]">
         <button class="absolute inset-0 border-0 bg-slate-950/40" on:click={() => dispatch('close')} aria-label="បិទ Private Chat"></button>
         <div class="absolute right-0 top-0 flex h-full w-full max-w-md flex-col bg-white shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="private-chat-title">
-            <header class="flex min-h-16 items-center gap-3 bg-gradient-to-r from-blue-700 to-cyan-600 px-4 py-3 text-white">
+            <header class="relative flex min-h-16 items-center gap-3 bg-gradient-to-r from-blue-700 to-cyan-600 px-4 py-3 text-white">
                 {#if activeConversation}
                     <button class="grid h-9 w-9 place-items-center rounded-full bg-white/10 text-xl hover:bg-white/20" on:click={backToList} aria-label="ត្រឡប់ក្រោយ">←</button>
                 {:else}
@@ -223,13 +418,31 @@
                 {/if}
                 <div class="min-w-0 flex-1">
                     <h2 id="private-chat-title" class="truncate text-base font-black">{activeMember ? nameOf(activeMember) : 'Private Chat'}</h2>
-                    <p class="truncate text-xs font-semibold text-white/75">{activeMember ? 'សារឯកជនរវាងសមាជិកពីរនាក់' : 'ស្វែងរក និងផ្ញើសារទៅសមាជិក'}</p>
+                    <p class="truncate text-xs font-semibold text-white/75">
+                        {#if activeMember && typing}កំពុងវាយសារ…{:else if activeMember}{realtimeConnected ? 'ភ្ជាប់ Realtime' : 'កំពុងភ្ជាប់…'}{:else}ស្វែងរក និងផ្ញើសារទៅសមាជិក{/if}
+                    </p>
                 </div>
+                {#if activeConversation}
+                    <button class="grid h-9 w-9 place-items-center rounded-full bg-white/10 text-xl hover:bg-white/20" on:click={() => showSafetyMenu = !showSafetyMenu} aria-label="សុវត្ថិភាព Chat">⋮</button>
+                    {#if showSafetyMenu}
+                        <div class="absolute right-12 top-14 z-20 w-48 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-sm font-bold text-slate-700 shadow-xl">
+                            <button class="block w-full px-4 py-2 text-left hover:bg-slate-100" on:click={() => { showReportForm = true; showSafetyMenu = false; }}>⚑ Report</button>
+                            {#if activeConversation.block_state?.blocked_by_me}
+                                <button class="block w-full px-4 py-2 text-left text-blue-700 hover:bg-blue-50" on:click={() => updateBlock('unblock')} disabled={safetyBusy}>បើកការទាក់ទងវិញ</button>
+                            {:else}
+                                <button class="block w-full px-4 py-2 text-left text-red-700 hover:bg-red-50" on:click={() => updateBlock('block')} disabled={safetyBusy}>⛔ Block សមាជិក</button>
+                            {/if}
+                        </div>
+                    {/if}
+                {/if}
                 <button class="grid h-9 w-9 place-items-center rounded-full bg-white/10 text-xl hover:bg-white/20" on:click={() => dispatch('close')} aria-label="បិទ">×</button>
             </header>
 
             {#if errorMessage}
                 <div class="border-b border-red-200 bg-red-50 px-4 py-2 text-xs font-bold text-red-700">{errorMessage}</div>
+            {/if}
+            {#if successMessage}
+                <div class="border-b border-green-200 bg-green-50 px-4 py-2 text-xs font-bold text-green-700">{successMessage}</div>
             {/if}
 
             {#if activeConversation}
@@ -249,7 +462,7 @@
                                     <p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.body}</p>
                                     <div class="mt-1 flex items-center justify-end gap-1 text-[10px] {message.sender_id === currentUser?.id ? 'text-white/70' : 'text-slate-400'}">
                                         <span>{timeOf(message.created_at)}</span>
-                                        {#if message.sender_id === currentUser?.id}<span>{message.read_at ? '✓✓' : '✓'}</span>{/if}
+                                        {#if message.sender_id === currentUser?.id}<span>· {messageStatus(message)}</span>{/if}
                                     </div>
                                 </div>
                             </div>
@@ -257,11 +470,18 @@
                     {/if}
                 </div>
                 <div class="border-t border-slate-200 bg-white p-3">
-                    <div class="flex items-end gap-2">
-                        <textarea bind:value={composer} rows="1" maxlength="2000" placeholder="សរសេរសារ..." class="max-h-28 min-h-11 flex-1 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-blue-500" on:keydown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); } }}></textarea>
-                        <button class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-blue-600 text-lg text-white disabled:opacity-50" on:click={sendMessage} disabled={!composer.trim() || sending} aria-label="ផ្ញើសារ">➤</button>
-                    </div>
-                    <div class="mt-1 text-right text-[10px] text-slate-400">{composer.length}/2000</div>
+                    {#if activeConversation.block_state?.blocked_by_me}
+                        <div class="rounded-xl border border-red-200 bg-red-50 p-3 text-center text-xs font-bold text-red-700">អ្នកបាន Block សមាជិកនេះ។ <button class="ml-1 underline" on:click={() => updateBlock('unblock')}>បើកវិញ</button></div>
+                    {:else if activeConversation.block_state?.blocked_by_member}
+                        <div class="rounded-xl border border-slate-200 bg-slate-100 p-3 text-center text-xs font-bold text-slate-600">មិនអាចផ្ញើសារក្នុងការសន្ទនានេះបានទេ។</div>
+                    {:else}
+                        {#if typing}<div class="mb-1 text-xs font-bold text-blue-600">{nameOf(activeMember)} កំពុងវាយសារ…</div>{/if}
+                        <div class="flex items-end gap-2">
+                            <textarea bind:value={composer} rows="1" maxlength="2000" placeholder="សរសេរសារ..." class="max-h-28 min-h-11 flex-1 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-blue-500" on:input={handleComposerInput} on:blur={() => sendTyping(false)} on:keydown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); } }}></textarea>
+                            <button class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-blue-600 text-lg text-white disabled:opacity-50" on:click={sendMessage} disabled={!composer.trim() || sending} aria-label="ផ្ញើសារ">➤</button>
+                        </div>
+                        <div class="mt-1 text-right text-[10px] text-slate-400">{composer.length}/2000</div>
+                    {/if}
                 </div>
             {:else}
                 <div class="border-b border-slate-200 bg-white p-3">
@@ -272,6 +492,15 @@
                     </label>
                 </div>
                 <div class="flex-1 overflow-y-auto bg-slate-50 p-3">
+                    {#if pushSupported && !pushEnabled}
+                        <button class="mb-3 flex w-full items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-left text-amber-900 disabled:opacity-60" on:click={enablePushNotifications} disabled={pushBusy || pushDenied}>
+                            <span class="text-xl">🔔</span>
+                            <span class="min-w-0 flex-1"><strong class="block text-xs">បើក Push Notification</strong><span class="block text-[10px] opacity-75">ទទួលដំណឹងពេលមានសារថ្មី ទោះបិទ Chat ក៏ដោយ</span></span>
+                            {#if pushBusy}<span class="loading loading-spinner loading-xs"></span>{/if}
+                        </button>
+                    {:else if pushEnabled}
+                        <div class="mb-3 rounded-xl border border-green-200 bg-green-50 px-3 py-2 text-xs font-bold text-green-700">🔔 Push Notification បានបើក</div>
+                    {/if}
                     {#if memberSearch.trim().length >= 2}
                         <div class="mb-2 text-xs font-black text-slate-500">លទ្ធផលស្វែងរក</div>
                         {#if !searching && memberResults.length === 0}
@@ -302,6 +531,29 @@
                             {/each}
                         </div>
                     {/if}
+                </div>
+            {/if}
+
+            {#if showReportForm}
+                <div class="absolute inset-0 z-30 grid place-items-center bg-slate-950/50 p-4">
+                    <div class="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
+                        <h3 class="text-lg font-black text-slate-900">Report {nameOf(activeMember)}</h3>
+                        <p class="mt-1 text-xs text-slate-500">Report នឹងត្រូវផ្ញើទៅអ្នកគ្រប់គ្រងដោយសម្ងាត់។</p>
+                        <label class="mt-4 block text-xs font-bold text-slate-700" for="chat-report-reason">មូលហេតុ</label>
+                        <select id="chat-report-reason" bind:value={reportReason} class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
+                            <option value="spam">Spam</option>
+                            <option value="harassment">ការរំខាន ឬគំរាមកំហែង</option>
+                            <option value="inappropriate">ខ្លឹមសារមិនសមរម្យ</option>
+                            <option value="privacy">បញ្ហាឯកជនភាព</option>
+                            <option value="other">ផ្សេងៗ</option>
+                        </select>
+                        <label class="mt-3 block text-xs font-bold text-slate-700" for="chat-report-details">ព័ត៌មានបន្ថែម</label>
+                        <textarea id="chat-report-details" bind:value={reportDetails} maxlength="1000" rows="4" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm" placeholder="ពណ៌នាបញ្ហា..."></textarea>
+                        <div class="mt-4 flex gap-2">
+                            <button class="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm font-bold" on:click={() => showReportForm = false} disabled={safetyBusy}>បោះបង់</button>
+                            <button class="flex-1 rounded-xl bg-red-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50" on:click={submitReport} disabled={safetyBusy}>{safetyBusy ? 'កំពុងផ្ញើ…' : 'ផ្ញើ Report'}</button>
+                        </div>
+                    </div>
                 </div>
             {/if}
         </div>
