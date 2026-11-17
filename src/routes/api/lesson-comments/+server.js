@@ -1,5 +1,6 @@
 import { json as kitJson } from '@sveltejs/kit';
 import { getRequestUserId, serviceClient } from '$lib/server/requestAuth';
+import { sendPushToUser } from '$lib/server/pushNotifications';
 
 const ADMIN_ROLES = new Set(['admin', 'owner']);
 const REPORT_REASONS = new Set(['spam', 'harassment', 'privacy', 'misinformation', 'other']);
@@ -10,11 +11,15 @@ const COMMENT_SELECT = `
     course_id,
     author_id,
     parent_id,
+    reply_to_id,
     body,
     status,
     is_pinned,
     pinned_at,
     pinned_by,
+    is_resolved,
+    resolved_at,
+    resolved_by,
     edited_at,
     created_at,
     updated_at,
@@ -37,6 +42,25 @@ function validUuid(value) {
 
 function cleanBody(value) {
     return String(value || '').replace(/\r\n?/g, '\n').trim();
+}
+
+function mentionedUserIds(value) {
+    const ids = new Set();
+    const expression = /@\[[^\]\n]{1,80}\]\(([0-9a-f-]{36})\)/gi;
+    for (const match of String(value || '').matchAll(expression)) {
+        if (validUuid(match[1])) ids.add(match[1].toLowerCase());
+    }
+    return [...ids].slice(0, 10);
+}
+
+function pushUrl(comment) {
+    const params = new URLSearchParams({
+        openDiscussion: '1',
+        course_id: comment.course_id,
+        lesson_id: comment.lesson_id,
+        comment_id: comment.id
+    });
+    return `/?${params.toString()}`;
 }
 
 function unavailable() {
@@ -131,6 +155,8 @@ function presentComment(comment, actor, reportedIds = new Set(), reportCounts = 
         can_delete: isAuthor || isAdmin,
         can_moderate: isAdmin,
         can_pin: isAdmin && isVisible && !comment.parent_id,
+        can_resolve: isAdmin && isVisible && !comment.parent_id,
+        can_view_history: Boolean(comment.edited_at) && (isAuthor || isAdmin),
         reported_by_me: reportedIds.has(comment.id),
         report_count: isAdmin ? (reportCounts.get(comment.id) || 0) : 0,
         reactions: reactionCounts.get(comment.id) || { like: 0, love: 0, helpful: 0 },
@@ -176,14 +202,12 @@ async function writeModerationLog(supabase, actor, action, commentId) {
     if (error) console.warn('Unable to write lesson comment moderation log:', error.message);
 }
 
-async function createCommentNotifications(supabase, actor, comment, parentAuthorId = null) {
-    const [participantsResult, adminsResult] = await Promise.all([
+async function createCommentNotifications(event, supabase, actor, comment, replyAuthorId = null, mentionIds = []) {
+    const [subscriptionsResult, adminsResult] = await Promise.all([
         supabase
-            .from('lesson_comments')
-            .select('author_id')
+            .from('lesson_comment_subscriptions')
+            .select('user_id')
             .eq('lesson_id', comment.lesson_id)
-            .eq('status', 'visible')
-            .neq('author_id', actor.id)
             .limit(500),
         supabase
             .from('users')
@@ -193,23 +217,26 @@ async function createCommentNotifications(supabase, actor, comment, parentAuthor
             .limit(100)
     ]);
 
-    if (participantsResult.error || adminsResult.error) {
+    if (subscriptionsResult.error || adminsResult.error) {
         console.warn(
             'Unable to resolve lesson comment notification recipients:',
-            participantsResult.error?.message || adminsResult.error?.message
+            subscriptionsResult.error?.message || adminsResult.error?.message
         );
         return;
     }
 
     const recipientTypes = new Map();
-    for (const participant of participantsResult.data || []) {
-        recipientTypes.set(participant.author_id, 'lesson_comment');
+    for (const subscription of subscriptionsResult.data || []) {
+        if (subscription.user_id !== actor.id) recipientTypes.set(subscription.user_id, 'lesson_comment');
     }
     for (const admin of adminsResult.data || []) {
         if (!recipientTypes.has(admin.id)) recipientTypes.set(admin.id, 'lesson_comment');
     }
-    if (parentAuthorId && parentAuthorId !== actor.id) {
-        recipientTypes.set(parentAuthorId, 'reply');
+    if (replyAuthorId && replyAuthorId !== actor.id) {
+        recipientTypes.set(replyAuthorId, 'reply');
+    }
+    for (const mentionedId of mentionIds) {
+        if (mentionedId !== actor.id) recipientTypes.set(mentionedId, 'mention');
     }
 
     const notifications = [...recipientTypes.entries()].map(([userId, notificationType]) => ({
@@ -227,7 +254,24 @@ async function createCommentNotifications(supabase, actor, comment, parentAuthor
         .from('lesson_comment_notifications')
         .upsert(notifications, { onConflict: 'user_id,comment_id', ignoreDuplicates: true });
 
-    if (error) console.warn('Unable to create lesson comment notifications:', error.message);
+    if (error) {
+        console.warn('Unable to create lesson comment notifications:', error.message);
+        return;
+    }
+
+    const actorName = actor.full_name || actor.name_latin || 'CCN-CPD member';
+    const preview = String(comment.body || '').replace(/@\[([^\]]+)\]\([^)]+\)/g, '@$1').slice(0, 120);
+    await Promise.allSettled([...recipientTypes.entries()].slice(0, 50).map(([userId, notificationType]) =>
+        sendPushToUser({
+            platform: event.platform,
+            supabase,
+            userId,
+            title: notificationType === 'mention' ? `${actorName} mentioned you` : `${actorName} commented`,
+            body: preview,
+            url: pushUrl(comment),
+            tag: `lesson-comment-${comment.id}`
+        })
+    ));
 }
 
 export async function GET(event) {
@@ -237,6 +281,45 @@ export async function GET(event) {
 
         const actor = await requireActor(event, supabase);
         if (!actor) return json({ error: 'Unauthorized' }, { status: 401 });
+
+        const historyCommentId = event.url.searchParams.get('history_comment_id');
+        if (historyCommentId !== null) {
+            const { data: comment, error: commentError } = await loadComment(supabase, historyCommentId);
+            if (commentError) return dbError(commentError);
+            if (!comment) return json({ error: 'Comment not found' }, { status: 404 });
+            const access = await requireLessonAccess(supabase, actor, comment.lesson_id, comment.course_id);
+            const denied = accessError(access);
+            if (denied) return denied;
+            if (comment.author_id !== actor.id && !ADMIN_ROLES.has(actor.role)) {
+                return json({ error: 'Forbidden' }, { status: 403 });
+            }
+            const { data: edits, error } = await supabase
+                .from('lesson_comment_edits')
+                .select('id, previous_body, new_body, edited_at')
+                .eq('comment_id', comment.id)
+                .order('edited_at', { ascending: false })
+                .limit(50);
+            if (error) return dbError(error);
+            return json({ edits: edits || [] });
+        }
+
+        const mentionSearch = event.url.searchParams.get('mention_search');
+        if (mentionSearch !== null) {
+            const lessonId = event.url.searchParams.get('lesson_id');
+            const access = await requireLessonAccess(supabase, actor, lessonId);
+            const denied = accessError(access);
+            if (denied) return denied;
+            const search = mentionSearch.trim().replace(/[,()%]/g, '').slice(0, 40);
+            if (!search) return json({ users: [] });
+            const { data: users, error } = await supabase
+                .from('users')
+                .select('id, full_name, name_latin, avatar_url, role')
+                .or(`full_name.ilike.%${search}%,name_latin.ilike.%${search}%`)
+                .neq('id', actor.id)
+                .limit(8);
+            if (error) return dbError(error);
+            return json({ users: users || [] });
+        }
 
         const requestedCourseIds = event.url.searchParams.get('course_ids');
         if (requestedCourseIds !== null) {
@@ -287,15 +370,66 @@ export async function GET(event) {
         const denied = accessError(access);
         if (denied) return denied;
 
-        const { data: comments, error } = await supabase
+        const limit = Math.min(50, Math.max(10, Number(event.url.searchParams.get('limit')) || 20));
+        const before = event.url.searchParams.get('before');
+        const focusCommentId = event.url.searchParams.get('focus_comment_id');
+        let parentsQuery = supabase
             .from('lesson_comments')
-            .select(COMMENT_SELECT)
+            .select(COMMENT_SELECT, { count: 'exact' })
             .eq('lesson_id', access.lesson.id)
+            .is('parent_id', null)
             .order('is_pinned', { ascending: false })
-            .order('created_at', { ascending: true })
-            .limit(200);
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: false })
+            .limit(limit + 1);
+
+        if (before) {
+            const beforeDate = new Date(before);
+            if (Number.isNaN(beforeDate.getTime())) return json({ error: 'Invalid pagination cursor' }, { status: 400 });
+            parentsQuery = parentsQuery.lt('created_at', beforeDate.toISOString());
+        }
+
+        const { data: parentRows, error, count: totalThreads } = await parentsQuery;
 
         if (error) return dbError(error);
+
+        const hasMore = (parentRows || []).length > limit;
+        let parents = (parentRows || []).slice(0, limit);
+
+        if (!before && validUuid(focusCommentId) && !parents.some(comment => comment.id === focusCommentId)) {
+            const { data: focused } = await supabase
+                .from('lesson_comments')
+                .select(COMMENT_SELECT)
+                .eq('id', focusCommentId)
+                .eq('lesson_id', access.lesson.id)
+                .maybeSingle();
+            if (focused) {
+                const rootId = focused.parent_id || focused.id;
+                if (!parents.some(comment => comment.id === rootId)) {
+                    const { data: root } = await supabase
+                        .from('lesson_comments')
+                        .select(COMMENT_SELECT)
+                        .eq('id', rootId)
+                        .maybeSingle();
+                    if (root) parents = [root, ...parents];
+                }
+            }
+        }
+
+        const parentIds = parents.map(comment => comment.id);
+        let replies = [];
+        if (parentIds.length) {
+            const { data: replyRows, error: repliesError } = await supabase
+                .from('lesson_comments')
+                .select(COMMENT_SELECT)
+                .in('parent_id', parentIds)
+                .order('created_at', { ascending: true })
+                .limit(1000);
+            if (repliesError) return dbError(repliesError);
+            replies = replyRows || [];
+        }
+
+        const comments = [...parents, ...replies];
 
         const commentIds = (comments || []).map(comment => comment.id);
         let reportedIds = new Set();
@@ -323,6 +457,14 @@ export async function GET(event) {
             }
         }
 
+        const { data: subscription, error: subscriptionError } = await supabase
+            .from('lesson_comment_subscriptions')
+            .select('user_id')
+            .eq('user_id', actor.id)
+            .eq('lesson_id', access.lesson.id)
+            .maybeSingle();
+        if (subscriptionError) return dbError(subscriptionError);
+
         return json({
             comments: (comments || []).map(comment => presentComment(
                 comment,
@@ -332,7 +474,11 @@ export async function GET(event) {
                 reactionSummary.counts,
                 reactionSummary.mine
             )),
-            can_moderate: ADMIN_ROLES.has(actor.role)
+            can_moderate: ADMIN_ROLES.has(actor.role),
+            subscribed: Boolean(subscription),
+            has_more: hasMore,
+            next_cursor: hasMore && parents.length ? parents[parents.length - 1].created_at : null,
+            total_threads: totalThreads || 0
         });
     } catch (error) {
         return serverError(error);
@@ -459,10 +605,30 @@ export async function POST(event) {
             });
         }
 
+        if (body.action === 'subscription') {
+            const access = await requireLessonAccess(supabase, actor, body.lesson_id, body.course_id);
+            const denied = accessError(access);
+            if (denied) return denied;
+            const subscribed = body.subscribed === true;
+            const result = subscribed
+                ? await supabase.from('lesson_comment_subscriptions').upsert({
+                    user_id: actor.id,
+                    lesson_id: access.lesson.id,
+                    course_id: access.course.id
+                }, { onConflict: 'user_id,lesson_id' })
+                : await supabase.from('lesson_comment_subscriptions')
+                    .delete()
+                    .eq('user_id', actor.id)
+                    .eq('lesson_id', access.lesson.id);
+            if (result.error) return dbError(result.error);
+            return json({ subscribed });
+        }
+
         const lessonId = body.lesson_id;
         const courseId = body.course_id;
         const commentBody = cleanBody(body.body);
-        const parentId = body.parent_id || null;
+        let parentId = body.parent_id || null;
+        let replyToId = null;
 
         if (commentBody.length < 1 || commentBody.length > 2000) {
             return json({ error: 'Comment must contain between 1 and 2000 characters' }, { status: 400 });
@@ -475,28 +641,6 @@ export async function POST(event) {
         const denied = accessError(access);
         if (denied) return denied;
 
-        if (body.action === 'pin') {
-            if (!ADMIN_ROLES.has(actor.role)) return json({ error: 'Forbidden' }, { status: 403 });
-            if (existing.parent_id || existing.status !== 'visible') {
-                return json({ error: 'Only visible top-level comments can be pinned' }, { status: 400 });
-            }
-
-            const pinned = body.pinned === true;
-            const { data: comment, error } = await supabase
-                .from('lesson_comments')
-                .update({
-                    is_pinned: pinned,
-                    pinned_at: pinned ? new Date().toISOString() : null,
-                    pinned_by: pinned ? actor.id : null
-                })
-                .eq('id', existing.id)
-                .select(COMMENT_SELECT)
-                .single();
-            if (error) return dbError(error);
-            await writeModerationLog(supabase, actor, pinned ? 'lesson_comment_pinned' : 'lesson_comment_unpinned', existing.id);
-            return json({ comment: presentComment(comment, actor) });
-        }
-
         let parentAuthorId = null;
         if (parentId) {
             const { data: parent, error: parentError } = await supabase
@@ -506,23 +650,59 @@ export async function POST(event) {
                 .maybeSingle();
 
             if (parentError) return dbError(parentError);
-            if (!parent || parent.status !== 'visible' || parent.parent_id
+            if (!parent || parent.status !== 'visible'
                 || parent.lesson_id !== access.lesson.id || parent.course_id !== access.course.id) {
                 return json({ error: 'Reply target is unavailable' }, { status: 400 });
             }
+            replyToId = parent.id;
+            parentId = parent.parent_id || parent.id;
             parentAuthorId = parent.author_id;
         }
 
         const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString();
-        const { count, error: countError } = await supabase
+        const { data: recentComments, count, error: countError } = await supabase
+            .from('lesson_comments')
+            .select('id, body, created_at', { count: 'exact' })
+            .eq('author_id', actor.id)
+            .gte('created_at', oneMinuteAgo)
+            .order('created_at', { ascending: false })
+            .limit(6);
+
+        if (countError) return dbError(countError);
+        if ((count || 0) >= 5) {
+            return json({ error: 'Please wait before posting more comments' }, { status: 429 });
+        }
+        const latest = recentComments?.[0];
+        if (latest && Date.now() - new Date(latest.created_at).getTime() < 2_000) {
+            return json({ error: 'Please wait before posting more comments' }, { status: 429 });
+        }
+        if ((recentComments || []).some(item => cleanBody(item.body).toLocaleLowerCase() === commentBody.toLocaleLowerCase())) {
+            return json({ error: 'Duplicate comment' }, { status: 409 });
+        }
+        if ((commentBody.match(/https?:\/\//gi) || []).length > 3) {
+            return json({ error: 'Too many links in one comment' }, { status: 400 });
+        }
+
+        const oneDayAgo = new Date(Date.now() - 86_400_000).toISOString();
+        const { count: dailyCount, error: dailyCountError } = await supabase
             .from('lesson_comments')
             .select('id', { count: 'exact', head: true })
             .eq('author_id', actor.id)
-            .gte('created_at', oneMinuteAgo);
+            .gte('created_at', oneDayAgo);
+        if (dailyCountError) return dbError(dailyCountError);
+        if ((dailyCount || 0) >= 100) {
+            return json({ error: 'Daily comment limit reached' }, { status: 429 });
+        }
 
-        if (countError) return dbError(countError);
-        if ((count || 0) >= 8) {
-            return json({ error: 'Please wait before posting more comments' }, { status: 429 });
+        const mentionIds = mentionedUserIds(commentBody).filter(id => id !== actor.id);
+        let validMentionIds = [];
+        if (mentionIds.length) {
+            const { data: mentionedUsers, error: mentionError } = await supabase
+                .from('users')
+                .select('id')
+                .in('id', mentionIds);
+            if (mentionError) return dbError(mentionError);
+            validMentionIds = (mentionedUsers || []).map(user => user.id);
         }
 
         const { data: comment, error } = await supabase
@@ -532,13 +712,26 @@ export async function POST(event) {
                 course_id: access.course.id,
                 author_id: actor.id,
                 parent_id: parentId,
+                reply_to_id: replyToId,
                 body: commentBody
             })
             .select(COMMENT_SELECT)
             .single();
 
         if (error) return dbError(error);
-        await createCommentNotifications(supabase, actor, comment, parentAuthorId);
+        if (validMentionIds.length) {
+            const { error: mentionInsertError } = await supabase.from('lesson_comment_mentions').insert(
+                validMentionIds.map(mentionedUserId => ({ comment_id: comment.id, mentioned_user_id: mentionedUserId }))
+            );
+            if (mentionInsertError) console.warn('Unable to store comment mentions:', mentionInsertError.message);
+        }
+        const { error: subscriptionError } = await supabase.from('lesson_comment_subscriptions').upsert({
+            user_id: actor.id,
+            lesson_id: access.lesson.id,
+            course_id: access.course.id
+        }, { onConflict: 'user_id,lesson_id' });
+        if (subscriptionError) console.warn('Unable to auto-follow lesson discussion:', subscriptionError.message);
+        await createCommentNotifications(event, supabase, actor, comment, parentAuthorId, validMentionIds);
         return json({ comment: presentComment(comment, actor) }, { status: 201 });
     } catch (error) {
         return serverError(error);
@@ -565,6 +758,70 @@ export async function PATCH(event) {
         const access = await requireLessonAccess(supabase, actor, existing.lesson_id, existing.course_id);
         const denied = accessError(access);
         if (denied) return denied;
+
+        if (body.action === 'pin') {
+            if (!ADMIN_ROLES.has(actor.role)) return json({ error: 'Forbidden' }, { status: 403 });
+            if (existing.parent_id || existing.status !== 'visible') {
+                return json({ error: 'Only visible top-level comments can be pinned' }, { status: 400 });
+            }
+            const pinned = body.pinned === true;
+            const { data: comment, error } = await supabase
+                .from('lesson_comments')
+                .update({
+                    is_pinned: pinned,
+                    pinned_at: pinned ? new Date().toISOString() : null,
+                    pinned_by: pinned ? actor.id : null
+                })
+                .eq('id', existing.id)
+                .select(COMMENT_SELECT)
+                .single();
+            if (error) return dbError(error);
+            await writeModerationLog(supabase, actor, pinned ? 'lesson_comment_pinned' : 'lesson_comment_unpinned', existing.id);
+            return json({ comment: presentComment(comment, actor) });
+        }
+
+        if (body.action === 'resolve') {
+            if (!ADMIN_ROLES.has(actor.role)) return json({ error: 'Forbidden' }, { status: 403 });
+            if (existing.parent_id || existing.status !== 'visible') {
+                return json({ error: 'Only visible top-level comments can be resolved' }, { status: 400 });
+            }
+            const resolved = body.resolved === true;
+            const { data: comment, error } = await supabase
+                .from('lesson_comments')
+                .update({
+                    is_resolved: resolved,
+                    resolved_at: resolved ? new Date().toISOString() : null,
+                    resolved_by: resolved ? actor.id : null
+                })
+                .eq('id', existing.id)
+                .select(COMMENT_SELECT)
+                .single();
+            if (error) return dbError(error);
+            await writeModerationLog(supabase, actor, resolved ? 'lesson_comment_resolved' : 'lesson_comment_reopened', existing.id);
+            if (resolved && existing.author_id !== actor.id) {
+                const { error: notificationError } = await supabase.from('lesson_comment_notifications').upsert({
+                    user_id: existing.author_id,
+                    actor_id: actor.id,
+                    comment_id: existing.id,
+                    lesson_id: existing.lesson_id,
+                    course_id: existing.course_id,
+                    notification_type: 'resolved',
+                    read_at: null,
+                    created_at: new Date().toISOString()
+                }, { onConflict: 'user_id,comment_id' });
+                if (notificationError) console.warn('Unable to create resolved notification:', notificationError.message);
+                await sendPushToUser({
+                    platform: event.platform,
+                    supabase,
+                    userId: existing.author_id,
+                    title: 'Your lesson question was resolved',
+                    body: existing.body.slice(0, 120),
+                    url: pushUrl(existing),
+                    tag: `lesson-comment-${existing.id}`
+                });
+            }
+            return json({ comment: presentComment(comment, actor) });
+        }
 
         if (body.action === 'moderate') {
             if (!ADMIN_ROLES.has(actor.role)) return json({ error: 'Forbidden' }, { status: 403 });
@@ -610,6 +867,16 @@ export async function PATCH(event) {
             return json({ error: 'Comment must contain between 1 and 2000 characters' }, { status: 400 });
         }
 
+        if (commentBody === existing.body) return json({ comment: presentComment(existing, actor) });
+
+        const { error: historyError } = await supabase.from('lesson_comment_edits').insert({
+            comment_id: existing.id,
+            editor_id: actor.id,
+            previous_body: existing.body,
+            new_body: commentBody
+        });
+        if (historyError) return dbError(historyError);
+
         const { data: comment, error } = await supabase
             .from('lesson_comments')
             .update({ body: commentBody, edited_at: new Date().toISOString() })
@@ -618,6 +885,22 @@ export async function PATCH(event) {
             .single();
 
         if (error) return dbError(error);
+        const mentionIds = mentionedUserIds(commentBody).filter(id => id !== actor.id);
+        const { error: clearMentionsError } = await supabase
+            .from('lesson_comment_mentions')
+            .delete()
+            .eq('comment_id', existing.id);
+        if (clearMentionsError) console.warn('Unable to refresh comment mentions:', clearMentionsError.message);
+        if (mentionIds.length) {
+            const { data: users } = await supabase.from('users').select('id').in('id', mentionIds);
+            const validIds = (users || []).map(user => user.id);
+            if (validIds.length) {
+                const { error: mentionError } = await supabase.from('lesson_comment_mentions').insert(
+                    validIds.map(mentionedUserId => ({ comment_id: existing.id, mentioned_user_id: mentionedUserId }))
+                );
+                if (mentionError) console.warn('Unable to refresh comment mentions:', mentionError.message);
+            }
+        }
         return json({ comment: presentComment(comment, actor) });
     } catch (error) {
         return serverError(error);

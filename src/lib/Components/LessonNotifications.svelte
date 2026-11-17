@@ -27,6 +27,13 @@
         }).format(new Date(value));
     }
 
+    function notificationMessage(type) {
+        if (type === 'reply') return ' បានឆ្លើយតបមតិរបស់អ្នក';
+        if (type === 'mention') return ' បាន Mention អ្នកក្នុង Comment';
+        if (type === 'resolved') return ' បានកំណត់សំណួររបស់អ្នកថាដោះស្រាយរួច';
+        return ' បានបញ្ចេញមតិក្នុងមេរៀនដែលអ្នកតាមដាន';
+    }
+
     async function loadNotifications() {
         loading = true;
         try {
@@ -153,7 +160,7 @@
                                     <div class="min-w-0 flex-1">
                                         <p class="text-sm leading-snug text-slate-800">
                                             <strong>{displayName(notification.actor)}</strong>
-                                            {notification.notification_type === 'reply' ? ' បានឆ្លើយតបមតិរបស់អ្នក' : ' បានបញ្ចេញមតិក្នុងមេរៀន'}
+                                            {notificationMessage(notification.notification_type)}
                                         </p>
                                         <p class="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">
                                             {notification.comment?.status === 'visible' ? notification.comment?.body : 'មតិនេះមិនអាចមើលបានទេ'}

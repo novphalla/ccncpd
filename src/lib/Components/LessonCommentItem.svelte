@@ -1,9 +1,12 @@
 <script>
     import { createEventDispatcher } from 'svelte';
-    import {
-        EyeIcon,
+	    import {
+	        CheckCircle2Icon,
+	        CopyIcon,
+	        EyeIcon,
         EyeOffIcon,
-        FlagIcon,
+	        FlagIcon,
+	        HistoryIcon,
         PencilIcon,
         PinIcon,
         ReplyIcon,
@@ -21,7 +24,21 @@
 
     $: displayName = comment?.author?.full_name || comment?.author?.name_latin || 'សមាជិក';
     $: initials = displayName.trim().slice(0, 2).toUpperCase();
-    $: visible = comment?.status === 'visible';
+	    $: visible = comment?.status === 'visible';
+	    $: bodyParts = parseBody(comment?.body || '');
+
+	    function parseBody(value) {
+	        const parts = [];
+	        const expression = /@\[([^\]]+)\]\([0-9a-f-]{36}\)/gi;
+	        let start = 0;
+	        for (const match of String(value).matchAll(expression)) {
+	            if (match.index > start) parts.push({ type: 'text', value: value.slice(start, match.index) });
+	            parts.push({ type: 'mention', value: `@${match[1]}` });
+	            start = match.index + match[0].length;
+	        }
+	        if (start < value.length) parts.push({ type: 'text', value: value.slice(start) });
+	        return parts.length ? parts : [{ type: 'text', value }];
+	    }
 
     function formatDate(value) {
         if (!value) return '';
@@ -68,9 +85,12 @@
             {#if ['admin', 'owner'].includes(comment?.author?.role)}
                 <span class="admin-badge"><ShieldCheckIcon size={12} /> Instructor</span>
             {/if}
-            {#if comment.is_pinned}
-                <span class="pinned-badge"><PinIcon size={11} /> Pinned Answer</span>
-            {/if}
+	            {#if comment.is_pinned}
+	                <span class="pinned-badge"><PinIcon size={11} /> Pinned Answer</span>
+	            {/if}
+	            {#if comment.is_resolved}
+	                <span class="resolved-badge"><CheckCircle2Icon size={11} /> បានដោះស្រាយ</span>
+	            {/if}
             <time datetime={comment.created_at}>{formatDate(comment.created_at)}</time>
             {#if comment.edited_at && visible}<span class="edited-label">បានកែ</span>{/if}
             {#if comment.can_moderate && comment.report_count > 0}
@@ -93,7 +113,11 @@
         {:else if comment.status === 'hidden'}
             <p class="moderated-message">មតិនេះត្រូវបានលាក់ដោយអ្នកគ្រប់គ្រង។</p>
         {:else}
-            <p class="comment-body">{comment.body}</p>
+	            <p class="comment-body">
+	                {#each bodyParts as part}
+	                    {#if part.type === 'mention'}<span class="mention">{part.value}</span>{:else}{part.value}{/if}
+	                {/each}
+	            </p>
         {/if}
 
         {#if !editing}
@@ -111,14 +135,20 @@
                 </div>
             {/if}
             <div class="comment-actions">
-                {#if visible && depth === 0}
+	                {#if visible}
                     <button on:click={() => dispatch('reply', comment)}>
                         <ReplyIcon size={14} /> ឆ្លើយតប
                     </button>
                 {/if}
-                {#if comment.can_edit}
-                    <button on:click={beginEdit}><PencilIcon size={14} /> កែ</button>
-                {/if}
+	                {#if comment.can_edit}
+	                    <button on:click={beginEdit}><PencilIcon size={14} /> កែ</button>
+	                {/if}
+	                {#if comment.can_view_history}
+	                    <button on:click={() => dispatch('history', comment)}><HistoryIcon size={14} /> ប្រវត្តិកែ</button>
+	                {/if}
+	                {#if visible}
+	                    <button on:click={() => dispatch('copylink', comment)}><CopyIcon size={14} /> ចម្លងតំណ</button>
+	                {/if}
                 {#if comment.can_delete && comment.status !== 'deleted'}
                     <button class="danger" on:click={() => dispatch('delete', comment)}>
                         <Trash2Icon size={14} /> លុប
@@ -138,11 +168,16 @@
                         {#if visible}<EyeOffIcon size={14} /> លាក់{:else}<EyeIcon size={14} /> បង្ហាញ{/if}
                     </button>
                 {/if}
-                {#if comment.can_pin}
+	                {#if comment.can_pin}
                     <button class:pinned-action={comment.is_pinned} on:click={() => dispatch('pin', { comment, pinned: !comment.is_pinned })}>
                         <PinIcon size={14} /> {comment.is_pinned ? 'ដក Pin' : 'Pin Answer'}
                     </button>
-                {/if}
+	                {/if}
+	                {#if comment.can_resolve}
+	                    <button class:resolved-action={comment.is_resolved} on:click={() => dispatch('resolve', { comment, resolved: !comment.is_resolved })}>
+	                        <CheckCircle2Icon size={14} /> {comment.is_resolved ? 'បើកឡើងវិញ' : 'ដោះស្រាយរួច'}
+	                    </button>
+	                {/if}
             </div>
         {/if}
     </div>
@@ -217,6 +252,18 @@
         font-weight: 800;
     }
 
+    .resolved-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.18rem;
+        border-radius: 999px;
+        background: #dcfce7;
+        color: #15803d;
+        padding: 0.1rem 0.4rem;
+        font-size: 0.62rem;
+        font-weight: 800;
+    }
+
     .comment-body {
         margin-top: 0.35rem;
         white-space: pre-wrap;
@@ -225,6 +272,7 @@
         font-size: 0.82rem;
         line-height: 1.6;
     }
+    .mention { color: #0f766e; font-weight: 800; }
 
     .moderated-message {
         margin-top: 0.35rem;
@@ -274,6 +322,7 @@
     .comment-actions button.danger:hover { color: #dc2626; }
     .comment-actions button.reported { color: #b45309; }
     .comment-actions button.pinned-action { color: #b45309; }
+    .comment-actions button.resolved-action { color: #15803d; }
     .comment-actions button:disabled { cursor: default; opacity: 0.72; }
 
     .edit-box { margin-top: 0.45rem; }

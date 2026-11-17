@@ -118,6 +118,16 @@
             chatUrl.searchParams.delete('openChat');
             window.history.replaceState(window.history.state, '', `${chatUrl.pathname}${chatUrl.search}${chatUrl.hash}`);
         }
+        if (chatUrl.searchParams.get('openDiscussion') === '1') {
+            const detail = {
+                course_id: chatUrl.searchParams.get('course_id'),
+                lesson_id: chatUrl.searchParams.get('lesson_id'),
+                comment_id: chatUrl.searchParams.get('comment_id')
+            };
+            for (const key of ['openDiscussion', 'course_id', 'lesson_id', 'comment_id']) chatUrl.searchParams.delete(key);
+            window.history.replaceState(window.history.state, '', `${chatUrl.pathname}${chatUrl.search}${chatUrl.hash}`);
+            setTimeout(() => openNotificationDiscussion({ detail }), 0);
+        }
         return () => {
             clearInterval(interval);
             clearInterval(discussionInterval);

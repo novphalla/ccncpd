@@ -2,6 +2,8 @@
     import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
     import {
         AlertCircleIcon,
+        BellIcon,
+        BellOffIcon,
         FlagIcon,
         LoaderCircleIcon,
         MessageCircleIcon,
@@ -35,6 +37,17 @@
     let searchTerm = '';
     let commentFilter = 'all';
     let sortMode = 'newest';
+    let subscribed = false;
+    let hasMore = false;
+    let nextCursor = null;
+    let loadingMore = false;
+    let totalThreads = 0;
+    let mentionSuggestions = [];
+    let mentionLoading = false;
+    let mentionTimer;
+    let historyTarget = null;
+    let historyEntries = [];
+    let historyLoading = false;
 
     $: topLevelComments = comments.filter(comment => !comment.parent_id);
     $: filteredComments = topLevelComments
@@ -67,6 +80,7 @@
         const thread = [comment, ...repliesFor(comment.id)];
         if (!thread.some(commentMatchesSearch)) return false;
         if (commentFilter === 'pinned') return comment.is_pinned;
+        if (commentFilter === 'resolved') return comment.is_resolved;
         if (commentFilter === 'instructor') return thread.some(isInstructor);
         if (commentFilter === 'mine') return thread.some(item => item.author_id === currentUser?.id);
         return true;
@@ -98,6 +112,14 @@
         return translations[message] || message;
     }
 
+    function formatHistoryDate(value) {
+        try {
+            return new Intl.DateTimeFormat('km-KH', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+        } catch {
+            return '';
+        }
+    }
+
     async function markCommentsRead() {
         if (!lesson?.id || lesson.id === 'fallback' || !course?.id || !currentUser) return;
 
@@ -126,19 +148,37 @@
         }
     }
 
-    async function loadComments(showLoader = false) {
+    function mergeComments(current, incoming) {
+        const merged = new Map(current.map(comment => [comment.id, comment]));
+        for (const comment of incoming) merged.set(comment.id, comment);
+        return [...merged.values()];
+    }
+
+    async function loadComments(showLoader = false, append = false) {
         if (!lesson?.id || lesson.id === 'fallback' || !currentUser) return;
-        if (showLoader) loading = true;
+        if (append) loadingMore = true;
+        else if (showLoader) loading = true;
         else refreshing = true;
 
         try {
-            const response = await fetch(`/api/lesson-comments?lesson_id=${encodeURIComponent(lesson.id)}`, {
+            const pageSize = append ? 20 : Math.min(50, Math.max(20, topLevelComments.length));
+            const params = new URLSearchParams({ lesson_id: lesson.id, limit: String(pageSize) });
+            if (append && nextCursor) params.set('before', nextCursor);
+            if (!append && focusCommentId) params.set('focus_comment_id', focusCommentId);
+            const response = await fetch(`/api/lesson-comments?${params.toString()}`, {
                 credentials: 'same-origin',
                 cache: 'no-store'
             });
             const payload = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(apiError(payload, 'មិនអាចទាញយកមតិបានទេ។'));
-            comments = payload.comments || [];
+            const incoming = payload.comments || [];
+            comments = append || (!showLoader && comments.length > 20)
+                ? mergeComments(comments, incoming)
+                : incoming;
+            subscribed = Boolean(payload.subscribed);
+            hasMore = Boolean(payload.has_more);
+            nextCursor = payload.next_cursor || null;
+            if (!append) totalThreads = Number(payload.total_threads) || 0;
             errorMessage = '';
             dispatch('count', comments.filter(comment => comment.status === 'visible').length);
             await markCommentsRead();
@@ -154,6 +194,7 @@
         } finally {
             loading = false;
             refreshing = false;
+            loadingMore = false;
         }
     }
 
@@ -305,6 +346,119 @@
         }
     }
 
+    async function resolveComment(event) {
+        if (actionBusy) return;
+        actionBusy = true;
+        const { comment, resolved } = event.detail;
+        try {
+            const response = await fetch('/api/lesson-comments', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ action: 'resolve', comment_id: comment.id, resolved })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(apiError(payload, 'មិនអាចកំណត់ស្ថានភាពដោះស្រាយបានទេ។'));
+            comments = comments.map(item => item.id === payload.comment.id
+                ? { ...item, ...payload.comment, reactions: item.reactions, my_reaction: item.my_reaction }
+                : item);
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចកំណត់ស្ថានភាពដោះស្រាយបានទេ។';
+        } finally {
+            actionBusy = false;
+        }
+    }
+
+    async function toggleSubscription() {
+        if (actionBusy) return;
+        actionBusy = true;
+        try {
+            const response = await fetch('/api/lesson-comments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({
+                    action: 'subscription',
+                    lesson_id: lesson.id,
+                    course_id: course.id,
+                    subscribed: !subscribed
+                })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(apiError(payload, 'មិនអាចប្ដូរការតាមដានបានទេ។'));
+            subscribed = Boolean(payload.subscribed);
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចប្ដូរការតាមដានបានទេ។';
+        } finally {
+            actionBusy = false;
+        }
+    }
+
+    async function copyCommentLink(event) {
+        const comment = event.detail;
+        const params = new URLSearchParams({
+            openDiscussion: '1',
+            course_id: course.id,
+            lesson_id: lesson.id,
+            comment_id: comment.id
+        });
+        const link = `${window.location.origin}/?${params.toString()}`;
+        try {
+            await navigator.clipboard.writeText(link);
+        } catch {
+            prompt('ចម្លងតំណ Comment:', link);
+        }
+    }
+
+    async function showEditHistory(event) {
+        historyTarget = event.detail;
+        historyEntries = [];
+        historyLoading = true;
+        try {
+            const response = await fetch(`/api/lesson-comments?history_comment_id=${encodeURIComponent(historyTarget.id)}`, {
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(apiError(payload, 'មិនអាចទាញប្រវត្តិកែបានទេ។'));
+            historyEntries = payload.edits || [];
+        } catch (error) {
+            errorMessage = error.message || 'មិនអាចទាញប្រវត្តិកែបានទេ។';
+            historyTarget = null;
+        } finally {
+            historyLoading = false;
+        }
+    }
+
+    function handleComposerInput() {
+        clearTimeout(mentionTimer);
+        const match = composer.match(/(?:^|\s)@([^@\s]{1,40})$/u);
+        if (!match) {
+            mentionSuggestions = [];
+            return;
+        }
+        mentionTimer = setTimeout(() => searchMentions(match[1]), 250);
+    }
+
+    async function searchMentions(query) {
+        mentionLoading = true;
+        try {
+            const params = new URLSearchParams({ lesson_id: lesson.id, mention_search: query });
+            const response = await fetch(`/api/lesson-comments?${params.toString()}`, { credentials: 'same-origin' });
+            const payload = await response.json().catch(() => ({}));
+            mentionSuggestions = response.ok ? (payload.users || []) : [];
+        } finally {
+            mentionLoading = false;
+        }
+    }
+
+    function selectMention(user) {
+        const name = user.full_name || user.name_latin || 'សមាជិក';
+        composer = composer.replace(/@[^@\s]{1,40}$/u, `@[${name}](${user.id}) `);
+        mentionSuggestions = [];
+        tick().then(() => composerElement?.focus());
+    }
+
     function beginReply(event) {
         replyTo = event.detail;
         tick().then(() => composerElement?.focus());
@@ -359,6 +513,7 @@
 
     onDestroy(() => {
         clearInterval(refreshTimer);
+        clearTimeout(mentionTimer);
         document.removeEventListener('visibilitychange', refreshWhenVisible);
     });
 </script>
@@ -379,6 +534,9 @@
             </div>
         </div>
         <div class="flex items-center gap-1">
+            <button class:active={subscribed} class="icon-button" on:click={toggleSubscription} disabled={actionBusy} aria-label={subscribed ? 'ឈប់តាមដានការពិភាក្សា' : 'តាមដានការពិភាក្សា'} title={subscribed ? 'កំពុងតាមដាន' : 'តាមដាន និងទទួលការជូនដំណឹង'}>
+                {#if subscribed}<BellIcon size={17} />{:else}<BellOffIcon size={17} />{/if}
+            </button>
             <button class="icon-button" on:click={() => loadComments(false)} disabled={refreshing} aria-label="ផ្ទុកមតិឡើងវិញ" title="ផ្ទុកឡើងវិញ">
                 <RefreshCwIcon size={17} class={refreshing ? 'animate-spin' : ''} />
             </button>
@@ -402,10 +560,25 @@
             rows="3"
             placeholder="សរសេរមតិអំពីមេរៀននេះ..."
             aria-label="សរសេរមតិ"
+            on:input={handleComposerInput}
             on:keydown={(event) => {
                 if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submitComment();
             }}
         ></textarea>
+        {#if mentionLoading || mentionSuggestions.length}
+            <div class="mention-menu">
+                {#if mentionLoading}
+                    <span class="mention-loading"><LoaderCircleIcon class="animate-spin" size={14} /> កំពុងស្វែងរក...</span>
+                {:else}
+                    {#each mentionSuggestions as user (user.id)}
+                        <button on:click={() => selectMention(user)}>
+                            <span>{(user.full_name || user.name_latin || 'សមាជិក').slice(0, 2)}</span>
+                            <strong>{user.full_name || user.name_latin || 'សមាជិក'}</strong>
+                        </button>
+                    {/each}
+                {/if}
+            </div>
+        {/if}
         <div class="composer-footer">
             <span>{composer.length}/2000</span>
             <button on:click={submitComment} disabled={!composer.trim() || submitting}>
@@ -433,6 +606,7 @@
             <select bind:value={commentFilter} aria-label="តម្រង comment">
                 <option value="all">Comment ទាំងអស់</option>
                 <option value="pinned">Pinned Answer</option>
+                <option value="resolved">បានដោះស្រាយ</option>
                 <option value="instructor">Instructor</option>
                 <option value="mine">Comment របស់ខ្ញុំ</option>
             </select>
@@ -465,6 +639,9 @@
                         on:moderate={moderateComment}
                         on:reaction={reactToComment}
                         on:pin={pinComment}
+                        on:resolve={resolveComment}
+                        on:copylink={copyCommentLink}
+                        on:history={showEditHistory}
                     />
                 </div>
                 {#each repliesFor(comment.id) as reply (reply.id)}
@@ -472,15 +649,24 @@
                         <LessonCommentItem
                             comment={reply}
                             depth={1}
+                            on:reply={beginReply}
                             on:edit={editComment}
                             on:delete={deleteComment}
                             on:report={beginReport}
                             on:moderate={moderateComment}
                             on:reaction={reactToComment}
+                            on:copylink={copyCommentLink}
+                            on:history={showEditHistory}
                         />
                     </div>
                 {/each}
             {/each}
+            {#if hasMore && !searchTerm && commentFilter === 'all'}
+                <button class="load-more" on:click={() => loadComments(false, true)} disabled={loadingMore}>
+                    {#if loadingMore}<LoaderCircleIcon class="animate-spin" size={16} />{/if}
+                    បង្ហាញ Comment ចាស់បន្ថែម ({Math.max(0, totalThreads - topLevelComments.length)})
+                </button>
+            {/if}
         {/if}
     </div>
 
@@ -513,6 +699,32 @@
                     រាយការណ៍
                 </button>
             </div>
+        </dialog>
+    </div>
+{/if}
+
+{#if historyTarget}
+    <div class="report-modal-backdrop" role="presentation" on:click|self={() => historyTarget = null}>
+        <dialog open class="report-modal history-modal" aria-labelledby="history-title">
+            <div class="flex items-center justify-between gap-3">
+                <h3 id="history-title">ប្រវត្តិកែ Comment</h3>
+                <button class="icon-button" on:click={() => historyTarget = null} aria-label="បិទ"><XIcon size={18} /></button>
+            </div>
+            {#if historyLoading}
+                <div class="history-empty"><LoaderCircleIcon class="animate-spin" size={20} /> កំពុងផ្ទុក...</div>
+            {:else if historyEntries.length === 0}
+                <div class="history-empty">មិនមានប្រវត្តិកែទេ។</div>
+            {:else}
+                <div class="history-list">
+                    {#each historyEntries as entry (entry.id)}
+                        <section>
+                            <time datetime={entry.edited_at}>{formatHistoryDate(entry.edited_at)}</time>
+                            <div><small>មុនកែ</small><p>{entry.previous_body}</p></div>
+                            <div><small>ក្រោយកែ</small><p>{entry.new_body}</p></div>
+                        </section>
+                    {/each}
+                </div>
+            {/if}
         </dialog>
     </div>
 {/if}
@@ -552,6 +764,7 @@
         color: #475569;
     }
     .icon-button:hover:not(:disabled) { background: #f1f5f9; color: #0f766e; }
+    .icon-button.active { border-color: #5eead4; background: #ccfbf1; color: #0f766e; }
     .icon-button:disabled { opacity: 0.55; }
 
     .composer-wrap { flex: 0 0 auto; padding: 0.75rem; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
@@ -568,6 +781,11 @@
         outline: none;
     }
     .composer-wrap textarea:focus { border-color: #0d9488; box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.12); }
+    .mention-menu { margin-top: 0.3rem; max-height: 11rem; overflow-y: auto; border: 1px solid #cbd5e1; border-radius: 0.6rem; background: #fff; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12); }
+    .mention-menu button { width: 100%; display: flex; align-items: center; gap: 0.5rem; border: 0; border-bottom: 1px solid #f1f5f9; background: #fff; color: #334155; padding: 0.5rem; text-align: left; font-size: 0.72rem; }
+    .mention-menu button:hover { background: #f0fdfa; }
+    .mention-menu button span { width: 1.7rem; height: 1.7rem; display: grid; place-items: center; border-radius: 999px; background: #ccfbf1; color: #0f766e; font-size: 0.6rem; font-weight: 800; }
+    .mention-loading { display: flex; align-items: center; gap: 0.35rem; padding: 0.55rem; color: #64748b; font-size: 0.7rem; }
 
     .replying-to { margin-bottom: 0.45rem; display: flex; justify-content: space-between; gap: 0.5rem; border-radius: 0.5rem; background: #ecfdf5; color: #047857; padding: 0.4rem 0.55rem; font-size: 0.7rem; }
     .replying-to button { border: 0; background: transparent; color: inherit; }
@@ -608,6 +826,8 @@
     }
     .empty-state { min-height: 12rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4rem; color: #94a3b8; text-align: center; font-size: 0.75rem; }
     .empty-state strong { color: #475569; font-size: 0.85rem; }
+    .load-more { margin: 0.75rem auto; display: flex; align-items: center; gap: 0.35rem; border: 1px solid #99f6e4; border-radius: 0.55rem; background: #f0fdfa; color: #0f766e; padding: 0.5rem 0.75rem; font-size: 0.7rem; font-weight: 800; }
+    .load-more:disabled { opacity: 0.6; }
     .safety-note { flex: 0 0 auto; border-top: 1px solid #e2e8f0; background: #fffbeb; color: #92400e; padding: 0.55rem 0.75rem; font-size: 0.66rem; line-height: 1.45; }
 
     .report-modal-backdrop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 1rem; background: rgba(15, 23, 42, 0.55); }
@@ -618,4 +838,12 @@
     .modal-button { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid #cbd5e1; border-radius: 0.5rem; background: #fff; color: #475569; padding: 0.45rem 0.7rem; font-size: 0.72rem; font-weight: 800; }
     .modal-button.danger { border-color: #dc2626; background: #dc2626; color: #fff; }
     .modal-button:disabled { opacity: 0.55; }
+    .history-modal { max-height: min(80vh, 680px); overflow-y: auto; }
+    .history-empty { min-height: 6rem; display: flex; align-items: center; justify-content: center; gap: 0.35rem; color: #64748b; font-size: 0.75rem; }
+    .history-list { margin-top: 0.75rem; display: grid; gap: 0.65rem; }
+    .history-list section { border: 1px solid #e2e8f0; border-radius: 0.65rem; padding: 0.65rem; }
+    .history-list time { color: #64748b; font-size: 0.65rem; font-weight: 700; }
+    .history-list div { margin-top: 0.45rem; }
+    .history-list small { color: #0f766e; font-size: 0.62rem; font-weight: 800; }
+    .history-list p { margin-top: 0.15rem; white-space: pre-wrap; overflow-wrap: anywhere; color: #334155; font-size: 0.72rem; line-height: 1.5; }
 </style>
