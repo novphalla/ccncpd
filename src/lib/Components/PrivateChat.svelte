@@ -129,8 +129,7 @@
     }
 
     function canEdit(message) {
-        return message.sender_id === currentUser?.id && !message.deleted_at
-            && Date.now() - new Date(message.created_at).getTime() <= 15 * 60_000;
+        return message.sender_id === currentUser?.id && !message.deleted_at;
     }
 
     function cleanupRealtime() {
@@ -639,7 +638,7 @@
                                                 <button class="rounded-full border px-1.5 py-0.5 text-[11px] {reaction?.reacted_by_me ? 'border-blue-400 bg-blue-100' : 'border-slate-200 bg-white'}" on:click={() => reactToMessage(message, emoji)} aria-label={`Reaction ${emoji}`}>{emoji}{#if reaction?.count} {reaction.count}{/if}</button>
                                             {/each}
                                             <button class="px-1 text-[10px] font-bold text-slate-500" on:click={() => beginReply(message)}>ឆ្លើយតប</button>
-                                            {#if canEdit(message)}<button class="px-1 text-[10px] font-bold text-slate-500" on:click={() => beginEdit(message)}>កែ</button>{/if}
+                                            {#if canEdit(message)}<button class="px-1 text-[10px] font-bold text-blue-600" on:click={() => beginEdit(message)}>✏️ កែសារ</button>{/if}
                                             {#if message.sender_id === currentUser?.id}<button class="px-1 text-[10px] font-bold text-red-500" on:click={() => deleteMessage(message)}>លុប</button>{/if}
                                         </div>
                                     {/if}

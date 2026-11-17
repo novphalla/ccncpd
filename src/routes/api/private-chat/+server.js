@@ -430,7 +430,6 @@ export async function POST(event) {
             if (!existing) return json({ error: 'Message not found' }, { status: 404 });
             if (existing.deleted_at) return json({ error: 'Message was already deleted' }, { status: 409 });
             if (body.action === 'edit') {
-                if (Date.now() - new Date(existing.created_at).getTime() > 15 * 60_000) return json({ error: 'Messages can only be edited for 15 minutes' }, { status: 409 });
                 const updatedBody = cleanText(body.body);
                 if (!updatedBody && !existing.attachment_key) return json({ error: 'Message cannot be empty' }, { status: 400 });
                 const { data: updated, error: updateError } = await supabase.from('private_messages')
