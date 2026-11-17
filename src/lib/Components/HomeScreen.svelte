@@ -7,6 +7,7 @@
     import MarqueeFooter from './MarqueeFooter.svelte';
     import TutorialModal from './TutorialModal.svelte';
     import LessonNotifications from './LessonNotifications.svelte';
+    import PrivateChat from './PrivateChat.svelte';
 
     export let currentUser;
     export let supabase; // ទទួលយក supabase client
@@ -51,6 +52,8 @@
     let discussionUnreadByLesson = {};
     let lessonNotificationCount = 0;
     let showLessonNotifications = false;
+    let privateChatUnreadCount = 0;
+    let showPrivateChat = false;
     let discussionFocusCommentId = null;
     let loadedUnreadSignature = '';
     let showTutorialModal = false;
@@ -106,11 +109,14 @@
         }, 1000);
         const discussionInterval = setInterval(() => loadDiscussionUnread(), 30_000);
         const notificationInterval = setInterval(() => loadLessonNotificationCount(), 30_000);
+        const chatInterval = setInterval(() => loadPrivateChatCount(), 15_000);
         loadLessonNotificationCount();
+        loadPrivateChatCount();
         return () => {
             clearInterval(interval);
             clearInterval(discussionInterval);
             clearInterval(notificationInterval);
+            clearInterval(chatInterval);
         };
     });
 
@@ -894,6 +900,24 @@
         }
     }
 
+    async function loadPrivateChatCount() {
+        if (!currentUser?.id) {
+            privateChatUnreadCount = 0;
+            return;
+        }
+        try {
+            const response = await fetch('/api/private-chat?count_only=1', {
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            if (!response.ok) return;
+            const payload = await response.json();
+            privateChatUnreadCount = Number(payload.unread_count) || 0;
+        } catch (error) {
+            console.warn('Unable to load private chat count:', error);
+        }
+    }
+
     async function openNotificationDiscussion(event) {
         const { course_id: courseId, lesson_id: lessonId, comment_id: commentId } = event.detail || {};
         showLessonNotifications = false;
@@ -1091,6 +1115,21 @@
                 </div>
             </button>
             <div class="flex gap-1">
+                <button
+                    class="relative rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none text-blue-700"
+                    on:click={() => showPrivateChat = true}
+                    aria-label="Private Chat"
+                    title="Private Chat"
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path>
+                    </svg>
+                    {#if privateChatUnreadCount > 0}
+                        <span class="absolute -right-2 -top-2 grid h-5 min-w-5 place-items-center rounded-full border-2 border-blue-50 bg-red-600 px-1 text-[10px] font-black text-white">
+                            {privateChatUnreadCount > 99 ? '99+' : privateChatUnreadCount}
+                        </span>
+                    {/if}
+                </button>
                 <button
                     class="relative rounded-full w-8 h-8 bg-white hover:bg-blue-100 shadow-sm flex items-center justify-center cursor-pointer border-0 outline-none text-teal-700"
                     on:click={() => showLessonNotifications = true}
@@ -1641,6 +1680,13 @@
     on:close={() => showLessonNotifications = false}
     on:count={(event) => lessonNotificationCount = event.detail}
     on:openDiscussion={openNotificationDiscussion}
+/>
+
+<PrivateChat
+    open={showPrivateChat}
+    {currentUser}
+    on:close={() => showPrivateChat = false}
+    on:count={(event) => privateChatUnreadCount = event.detail}
 />
 
 {#if showPaymentModal && selectedPaymentCourse}
